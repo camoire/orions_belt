@@ -20,6 +20,8 @@ from transformers import (
     BlipForConditionalGeneration,
     BlipProcessor,
 )
+from pydantic import BaseModel, Field
+from typing import Any, Optional
 
 # -----------------------------
 # Local Project Modules
@@ -119,7 +121,7 @@ def generate_from_messages(messages: list[dict]) -> str:
         with torch.inference_mode():
             generated_ids = model.generate(
                 **model_inputs,
-                max_new_tokens=1024,     # start smaller; raise if you really need 8192
+                max_new_tokens=256,
                 temperature=0.7,
                 do_sample=True,
                 pad_token_id=tokenizer.eos_token_id,
@@ -128,6 +130,7 @@ def generate_from_messages(messages: list[dict]) -> str:
     # Slice off the prompt tokens (recommended in Qwen docs) [1](https://qwen.readthedocs.io/en/v2.0/inference/chat.html)
     output_ids = generated_ids[0][len(model_inputs.input_ids[0]):]
     assistant_text = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+    print("Generated text:", assistant_text)
     return assistant_text
 
 # -----------------------------
@@ -232,12 +235,60 @@ async def generate_from_voice(file: UploadFile = File(...), session_id: str = "d
     return {"session_id": session_id, "transcription": voice_text, "generated_text": output}
 
 # -----------------------------
-# Endpoint: REset Session
+# Endpoint: Reset Session
 # -----------------------------
 @app.post("/reset-session")
 async def reset_session(session_id: str = Body(...)):
     conversations.clear(session_id)
     return {"status": "cleared", "session_id": session_id}
+
+class MemoryAddRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=10_000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+class MemoryAddResponse(BaseModel):
+    id: str
+
+class MemorySearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=10_000)
+    top_k: int = Field(default=5, ge=1, le=20)
+
+class MemorySearchItem(BaseModel):
+    text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    distance: Optional[float] = None
+
+class MemoryListResponse(BaseModel):
+    items: list[dict[str, Any]]
+    limit: int
+    offset: int
+
+@app.post("/memory/memory_add", response_model=MemoryAddResponse)
+async def memory_add(req: MemoryAddRequest):
+    memory_id = memory.add(req.text, req.metadata)
+    return MemoryAddResponse(id=memory_id)
+
+@app.post("/memory/memory_search", response_model=list[MemorySearchItem])
+async def memory_search(req: MemorySearchRequest):
+    results = memory.search(req.query, top_k=req.top_k)
+    # results already shaped as dicts; coerce to Pydantic output
+    return [MemorySearchItem(**r) for r in results]
+
+@app.get("/memory/memory_list", response_model=MemoryListResponse)
+async def memory_list(limit: int = 50, offset: int = 0):
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    items = memory.list_memories(limit=limit, offset=offset)
+    return MemoryListResponse(items=items, limit=limit, offset=offset)
+
+@app.delete("/memory/{memory_id}")
+async def memory_delete(memory_id: str):
+    # Optional: check existence first
+    existing = memory.get(memory_id)
+    if existing is None:
+        return {"status": "not_found", "id": memory_id}
+    memory.delete(memory_id)
+    return {"status": "deleted", "id": memory_id}
 
 # -----------------------------
 # Endpoint: Train LoRA
