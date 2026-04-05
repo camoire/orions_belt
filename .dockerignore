@@ -1,0 +1,37 @@
+# Ignore Python virtual environments
+venv/
+env/
+ENV/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore build artifacts
+*.so
+*.dll
+*.exe
+
+# Ignore editor/IDE files
+.vscode/
+.vs/
+.idea/
+
+# Ignore Git
+.git/
+.gitignore
+
+# Ignore OS junk
+Thumbs.db
+.DS_Store
+
+# Ignore large ML artifacts
+qwen_model_flat/
+qwen_model/
+blip_model/
+dataset/
+*.safetensors
+*.bin
+*.pt

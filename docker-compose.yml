@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: dockerfile.dev
+    container_name: orionsbelt-dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./dataset:/app/dataset
+      - ./lora_adapter:/app/lora_adapter
+    restart: unless-stopped
