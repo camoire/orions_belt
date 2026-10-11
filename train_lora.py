@@ -1,10 +1,13 @@
 import os
+from pathlib import Path
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
 from peft import LoraConfig, get_peft_model
 
-BASE_MODEL = "/models/qwen_model"
+BASE_MODEL = os.environ.get(
+    "BASE_MODEL", str(Path(__file__).resolve().parent / "qwen_model")
+)
 DATASET_PATH = "dataset/train.jsonl"
 VAL_PATH = "dataset/val.jsonl"
 OUTPUT_DIR = "lora_adapter"

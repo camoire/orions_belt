@@ -37,7 +37,9 @@ app = FastAPI()
 # -----------------------------
 # Load Base Model + Tokenizer
 # -----------------------------
-BASE_MODEL = "/models/qwen_model"
+BASE_MODEL = os.environ.get(
+    "BASE_MODEL", os.path.join(os.path.dirname(__file__), "qwen_model")
+)
 tokenizer = AutoTokenizer.from_pretrained(
     BASE_MODEL,
     local_files_only=True
@@ -71,7 +73,9 @@ model = try_load_lora(model)
 # -----------------------------
 # Load Image Captioning Model
 # -----------------------------
-BLIP_MODEL_PATH = os.environ.get("BLIP_MODEL_PATH", "/models/blip_model")
+BLIP_MODEL_PATH = os.environ.get(
+    "BLIP_MODEL_PATH", os.path.join(os.path.dirname(__file__), "blip_model")
+)
 
 processor = BlipProcessor.from_pretrained(
     BLIP_MODEL_PATH,

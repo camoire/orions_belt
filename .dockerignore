@@ -27,11 +27,6 @@ __pycache__/
 Thumbs.db
 .DS_Store
 
-# Ignore large ML artifacts
-qwen_model_flat/
-qwen_model/
-blip_model/
-dataset/
-*.safetensors
-*.bin
-*.pt
+# Ignore runtime data
+logs/
+chroma_db/
