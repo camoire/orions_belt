@@ -85,7 +85,7 @@ qwen_model/
 
 # 🧪 5. Generate Training Data
 
-Start the API locally with `uvicorn app:app --host 0.0.0.0 --port 8000` and send requests to `/generate`; the system logs interactions automatically. Stop the API after generating at least two interactions.  
+Start the API locally with `uvicorn app:app --host 0.0.0.0 --port 8000` and send requests to `/generate`; the system logs interactions automatically. Stop the API after generating at least two interactions.
 To convert logs into a training dataset:
 
 ```
@@ -178,13 +178,13 @@ Reloads the LoRA adapter without restarting the container.
 
 # 🧭 11. Typical Developer Workflow
 
-1. Pull latest code  
-2. Run `download_model.py` (only once per machine)  
-3. Start FastAPI locally and generate interaction logs  
-4. Run `build_dataset.py`  
-5. Run `train_lora.py` (optional)  
-6. Build and run the Docker image  
-7. Call `/reload-lora` to load an updated adapter  
+1. Pull latest code
+2. Run `download_model.py` (only once per machine)
+3. Start FastAPI locally and generate interaction logs
+4. Run `build_dataset.py`
+5. Run `train_lora.py` (optional)
+6. Build and run the Docker image
+7. Call `/reload-lora` to load an updated adapter
 
 ---
 

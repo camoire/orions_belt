@@ -40,6 +40,8 @@ def build_dataset():
     val_size = min(val_size, len(records) - 1)
     train, val = train_test_split(records, test_size=val_size, random_state=42)
 
+    DATASET_DIR.mkdir(parents=True, exist_ok=True)
+
     with open(DATASET_DIR / "train.jsonl", "w", encoding="utf-8") as f:
         for r in train:
             f.write(json.dumps(r) + "\n")

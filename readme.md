@@ -225,10 +225,10 @@ Your host machine must have:
 
 Your workflow:
 
-1. `python download_model.py`  
-2. `uvicorn app:app --host 0.0.0.0 --port 8000` and interact with `/generate` to create training logs  
-3. `python build_dataset.py`  
-4. `python train_lora.py` (optional; requires at least two logged interactions)  
-5. `docker build -t orions_belt .`  
-6. `docker run -p 8000:8000 orions_belt`  
-7. Use `/reload-lora` to hot‑swap adapters  
+1. `python download_model.py`
+2. `uvicorn app:app --host 0.0.0.0 --port 8000` and interact with `/generate` to create training logs
+3. `python build_dataset.py`
+4. `python train_lora.py` (optional; requires at least two logged interactions)
+5. `docker build -t orions_belt .`
+6. `docker run -p 8000:8000 orions_belt`
+7. Use `/reload-lora` to hot‑swap adapters
