@@ -95,13 +95,14 @@ OrionsBelt/
 ├── app.py                 # FastAPI app (generate, train-now, reload-lora)
 ├── train_lora.py          # LoRA training script
 ├── build_dataset.py       # Converts logs → training dataset
-├── download_model.py      # Downloads model + copies into qwen_model/
+├── download_model.py      # Downloads Qwen + BLIP models
 │
 ├── memory.py              # Memory store
 ├── behavior_logger.py     # Structured behavior logging
 │
 ├── lora_adapter/          # LoRA weights (after training)
-├── qwen_model/            # Local copy of Qwen model (downloaded once)
+├── qwen_model/            # Local Qwen model (downloaded once)
+├── blip_model/            # Local BLIP model (downloaded once)
 │
 ├── requirements.txt
 ├── Dockerfile
@@ -118,15 +119,24 @@ Run:
 python download_model.py
 ```
 
-This script:
+This script downloads both models into the project:
 
-- Downloads Qwen2.5‑7B‑Instruct into your Hugging Face cache  
-- Copies it into `qwen_model/`  
-- Prepares it for Docker  
+- Qwen2.5‑7B‑Instruct into `qwen_model/`
+- BLIP image captioning model into `blip_model/`
+
+The files are placed where the application and Docker image expect them. The script downloads model files without loading the full Qwen model into memory.
 
 ---
 
-# 🧪 Training a LoRA Adapter
+# 🧪 Generate Training Data and Train a LoRA Adapter
+
+Start the API locally so it can log interactions:
+
+```
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+Send some requests to `/generate`, then stop the server. The interactions are stored in `logs/interactions.jsonl`.
 
 Generate dataset:
 
@@ -162,7 +172,7 @@ This hot‑swaps the adapter instantly.
 
 # 🛠️ Build the Docker Image
 
-After the model + LoRA adapter are in place:
+After downloading the models, and optionally training a LoRA adapter:
 
 ```
 docker build -t orions_belt .
@@ -216,9 +226,9 @@ Your host machine must have:
 Your workflow:
 
 1. `python download_model.py`  
-2. `python build_dataset.py`  
-3. `python train_lora.py`  
-4. `docker build -t orions_belt .`  
-5. `docker run -p 8000:8000 orions_belt`  
-6. Use `/reload-lora` to hot‑swap adapters  
-
+2. `uvicorn app:app --host 0.0.0.0 --port 8000` and interact with `/generate` to create training logs  
+3. `python build_dataset.py`  
+4. `python train_lora.py` (optional; requires at least two logged interactions)  
+5. `docker build -t orions_belt .`  
+6. `docker run -p 8000:8000 orions_belt`  
+7. Use `/reload-lora` to hot‑swap adapters  

@@ -62,11 +62,12 @@ Run the helper script:
 python download_model.py
 ```
 
-This script:
+This script downloads both required models into the project:
 
-- Downloads Qwen2.5‑7B‑Instruct into your Hugging Face cache  
-- Copies it into the project’s `qwen_model/` directory  
-- Prepares it for Docker builds (no downloads inside Docker)
+- Qwen2.5‑7B‑Instruct into `qwen_model/`
+- BLIP image captioning model into `blip_model/`
+
+The files are placed where the application and Docker image expect them. The script downloads model files without loading the full Qwen model into memory.
 
 After this step, your project will contain:
 
@@ -84,7 +85,7 @@ qwen_model/
 
 # 🧪 5. Generate Training Data
 
-The system logs interactions automatically.  
+Start the API locally with `uvicorn app:app --host 0.0.0.0 --port 8000` and send requests to `/generate`; the system logs interactions automatically. Stop the API after generating at least two interactions.  
 To convert logs into a training dataset:
 
 ```
@@ -133,7 +134,7 @@ This reloads the adapter instantly.
 
 # 🛠️ 8. Build the Docker Image
 
-After the model + LoRA adapter are in place:
+After downloading the models, and optionally training a LoRA adapter:
 
 ```
 docker build -t orions_belt .
@@ -179,13 +180,11 @@ Reloads the LoRA adapter without restarting the container.
 
 1. Pull latest code  
 2. Run `download_model.py` (only once per machine)  
-3. Start FastAPI locally or via Docker  
-4. Interact with the model → logs accumulate  
-5. Run `build_dataset.py`  
-6. Run `train_lora.py`  
-7. Call `/reload-lora`  
-8. Test improvements  
-9. Build + push Docker image  
+3. Start FastAPI locally and generate interaction logs  
+4. Run `build_dataset.py`  
+5. Run `train_lora.py` (optional)  
+6. Build and run the Docker image  
+7. Call `/reload-lora` to load an updated adapter  
 
 ---
 
