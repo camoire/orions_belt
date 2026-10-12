@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   api:
     build:
@@ -9,7 +7,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      QWEN_GGUF_PATH: /app/qwen_model/Qwen2.5-Coder-14B-Instruct-Q6_K.gguf
+      QWEN_GGUF_PATH: /app/qwen_model/qwen2.5-coder-14b-instruct-q6_k-00001-of-00002.gguf
       BLIP_MODEL_PATH: /app/blip_model
     volumes:
       - ./logs:/app/logs
