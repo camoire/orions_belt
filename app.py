@@ -12,11 +12,9 @@ from threading import Lock
 import torch
 import whisper
 from fastapi import FastAPI, File, UploadFile, Body
-from peft import PeftModel
+from llama_cpp import Llama
 from PIL import Image
 from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
     BlipForConditionalGeneration,
     BlipProcessor,
 )
@@ -35,40 +33,30 @@ from train_lora import train_lora_adapter
 app = FastAPI()
 
 # -----------------------------
-# Load Base Model + Tokenizer
+# Load Qwen GGUF model
 # -----------------------------
-BASE_MODEL = os.environ.get(
-    "BASE_MODEL", os.path.join(os.path.dirname(__file__), "qwen_model")
+LLAMA_MODEL_PATH = os.environ.get(
+    "QWEN_GGUF_PATH",
+    os.path.join(
+        os.path.dirname(__file__),
+        "qwen_model",
+        "Qwen2.5-Coder-14B-Instruct-Q6_K.gguf",
+    ),
 )
-tokenizer = AutoTokenizer.from_pretrained(
-    BASE_MODEL,
-    local_files_only=True
-)
+LLAMA_LORA_PATH = os.environ.get("LLAMA_LORA_PATH")
 
-model = AutoModelForCausalLM.from_pretrained(
-    BASE_MODEL,
-    torch_dtype=torch.float16,
-    local_files_only=True
-)
-model.eval()
+def load_qwen_model():
+    model_options = {
+        "model_path": LLAMA_MODEL_PATH,
+        "n_ctx": int(os.environ.get("LLAMA_N_CTX", "8192")),
+        "n_gpu_layers": int(os.environ.get("LLAMA_N_GPU_LAYERS", "0")),
+        "verbose": False,
+    }
+    if LLAMA_LORA_PATH:
+        model_options["lora_path"] = LLAMA_LORA_PATH
+    return Llama(**model_options)
 
-# -----------------------------
-# Load LoRA Adapter (optional)
-# -----------------------------
-LORA_PATH = "lora_adapter"
-
-def try_load_lora(base_model):
-    adapter_config = os.path.join(LORA_PATH, "adapter_config.json")
-    adapter_model = os.path.join(LORA_PATH, "adapter_model.safetensors")
-
-    if os.path.exists(adapter_config) and os.path.exists(adapter_model):
-        print("Found LoRA adapter. Loading...")
-        return PeftModel.from_pretrained(base_model, LORA_PATH)
-    else:
-        print("No LoRA adapter found. Running base model only.")
-        return base_model
-
-model = try_load_lora(model)
+model = load_qwen_model()
 
 # -----------------------------
 # Load Image Captioning Model
@@ -107,55 +95,20 @@ training_state = {
 }
 
 # -----------------------------
-# Helper: Generate from Messages (Qwen chat-template)
+# Helper: Generate from chat messages
 # -----------------------------
 generation_lock = Lock()  # prevent concurrent generate() on same model instance
 
 def generate_from_messages(messages: list[dict]) -> str:
-    # Render messages using the model's chat template
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )  # Qwen docs recommend this pattern [1](https://qwen.readthedocs.io/en/v2.0/inference/chat.html)
-
-    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-
     with generation_lock:
-        with torch.inference_mode():
-            generated_ids = model.generate(
-                **model_inputs,
-                max_new_tokens=256,
-                temperature=0.7,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-
-    # Slice off the prompt tokens (recommended in Qwen docs) [1](https://qwen.readthedocs.io/en/v2.0/inference/chat.html)
-    output_ids = generated_ids[0][len(model_inputs.input_ids[0]):]
-    assistant_text = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+        result = model.create_chat_completion(
+            messages=messages,
+            max_tokens=256,
+            temperature=0.7,
+        )
+    assistant_text = (result["choices"][0]["message"]["content"] or "").strip()
     print("Generated text:", assistant_text)
     return assistant_text
-
-# -----------------------------
-# Helper: Generate Text
-# -----------------------------
-def generate_text(prompt: str):
-    inputs = tokenizer(prompt, return_tensors="pt")
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=1024,
-        temperature=0.7,
-        do_sample=True
-    )
-
-    decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-    # Strip the prompt from the output
-    if decoded.startswith(prompt):
-        decoded = decoded[len(prompt):].strip()
-
-    return decoded
 
 # -----------------------------
 # Endpoint: Text Generation
@@ -334,9 +287,11 @@ async def training_status():
 @app.post("/reload-lora")
 async def reload_lora():
     global model
-    base = AutoModelForCausalLM.from_pretrained(BASE_MODEL, torch_dtype=torch.float16)
-    model = try_load_lora(base)
-    return {"status": "LoRA reloaded (or skipped if none found)"}
+    with generation_lock:
+        model = load_qwen_model()
+    if LLAMA_LORA_PATH:
+        return {"status": "GGUF model reloaded with llama.cpp LoRA adapter"}
+    return {"status": "GGUF model reloaded without a LoRA adapter"}
 
 # -----------------------------
 # Endpoint: Train and Reload LoRA
@@ -352,14 +307,10 @@ async def train_and_reload():
     def run_training_and_reload():
         try:
             train_lora_adapter()
-            training_state["last_status"] = "training complete, reloading LoRA"
-
-            # Reload LoRA adapter
-            global model
-            base = AutoModelForCausalLM.from_pretrained(BASE_MODEL, torch_dtype=torch.float16)
-            if os.path.exists(LORA_PATH):
-                model = PeftModel.from_pretrained(base, LORA_PATH)
-            training_state["last_status"] = "training complete and LoRA reloaded"
+            training_state["last_status"] = (
+                "training complete; Transformers adapters are not compatible with "
+                "the GGUF inference model"
+            )
 
         except Exception as e:
             training_state["last_status"] = f"error: {str(e)}"

@@ -6,7 +6,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments,
 from peft import LoraConfig, get_peft_model
 
 BASE_MODEL = os.environ.get(
-    "BASE_MODEL", str(Path(__file__).resolve().parent / "qwen_model")
+    "HF_BASE_MODEL", "Qwen/Qwen2.5-7B-Instruct"
 )
 DATASET_PATH = "dataset/train.jsonl"
 VAL_PATH = "dataset/val.jsonl"

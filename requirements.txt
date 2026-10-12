@@ -3,6 +3,7 @@ uvicorn[standard]
 
 transformers
 transformers[vision]
+llama-cpp-python==0.3.36
 torch
 peft
 accelerate

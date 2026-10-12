@@ -3,10 +3,9 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 
 BASE_DIR = Path(__file__).resolve().parent
-MODELS = {
-    "Qwen/Qwen2.5-7B-Instruct": "qwen_model",
-    "Salesforce/blip-image-captioning-base": "blip_model",
-}
+QWEN_REPO = "bartowski/Qwen2.5-Coder-14B-Instruct-GGUF"
+QWEN_FILE = "Qwen2.5-Coder-14B-Instruct-Q6_K.gguf"
+BLIP_REPO = "Salesforce/blip-image-captioning-base"
 
 def main():
     token = os.environ.get("HF_TOKEN")
@@ -18,15 +17,19 @@ def main():
     else:
         print("✓ Using Hugging Face token for authenticated download.")
 
-    for model_name, directory in MODELS.items():
-        destination = BASE_DIR / directory
-        print(f"\n=== Downloading {model_name} to {destination} ===")
+    downloads = (
+        (QWEN_REPO, BASE_DIR / "qwen_model", [QWEN_FILE]),
+        (BLIP_REPO, BASE_DIR / "blip_model", None),
+    )
+    for repo_id, destination, patterns in downloads:
+        print(f"\n=== Downloading {repo_id} to {destination} ===")
         snapshot_download(
-            repo_id=model_name,
+            repo_id=repo_id,
             local_dir=destination,
+            allow_patterns=patterns,
             token=token,
         )
-        print(f"✓ {model_name} downloaded.")
+        print(f"✓ {repo_id} downloaded.")
 
     print("\nModels are ready for local use and Docker builds.")
 
