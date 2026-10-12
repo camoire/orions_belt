@@ -301,7 +301,11 @@ async def reload_lora():
             gc.collect()
             model = load_qwen_model()
         except Exception as exc:
-            return {"status": f"error reloading GGUF model: {exc}"}
+            print(f"GGUF model reload failed: {exc}")
+            raise HTTPException(
+                status_code=500,
+                detail="Could not reload GGUF model.",
+            ) from exc
     if LLAMA_LORA_PATH:
         return {"status": "GGUF model reloaded with llama.cpp LoRA adapter"}
     return {"status": "GGUF model reloaded without a LoRA adapter"}

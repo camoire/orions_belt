@@ -15,6 +15,6 @@ services:
       - ./logs:/app/logs
       - ./dataset:/app/dataset
       - ./lora_adapter:/app/lora_adapter
-      - ./qwen_model:/app/qwen_model
-      - ./blip_model:/app/blip_model
+      - ./qwen_model:/app/qwen_model:ro
+      - ./blip_model:/app/blip_model:ro
     restart: unless-stopped

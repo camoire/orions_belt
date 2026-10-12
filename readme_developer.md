@@ -66,7 +66,7 @@ This script downloads both required models into the project:
 - `Qwen2.5-Coder-14B-Instruct-Q6_K.gguf` from `bartowski/Qwen2.5-Coder-14B-Instruct-GGUF` into `qwen_model/`
 - BLIP image captioning model into `blip_model/`
 
-The Qwen GGUF is loaded locally by llama.cpp. CPU inference is the default. Set `QWEN_GGUF_PATH` to select another GGUF file or `LLAMA_N_GPU_LAYERS` when using a GPU-enabled llama-cpp-python build.
+The Qwen GGUF is loaded locally by llama.cpp. CPU inference is the default. Set `QWEN_GGUF_PATH` to select another GGUF file, `LLAMA_N_GPU_LAYERS` when using a GPU-enabled llama-cpp-python build, or `LLAMA_N_CTX` to change the context window (default: 8192 tokens).
 
 After this step, your project will contain:
 

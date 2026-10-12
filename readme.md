@@ -116,7 +116,7 @@ This script downloads both models into the project:
 - `Qwen2.5-Coder-14B-Instruct-Q6_K.gguf` from `bartowski/Qwen2.5-Coder-14B-Instruct-GGUF` into `qwen_model/`
 - BLIP image captioning model into `blip_model/`
 
-The Qwen inference path runs locally through llama.cpp. Set `QWEN_GGUF_PATH` to use a different GGUF file. CPU inference is the default; set `LLAMA_N_GPU_LAYERS` to configure GPU offloading when using a llama-cpp-python build with GPU support.
+The Qwen inference path runs locally through llama.cpp. Set `QWEN_GGUF_PATH` to use a different GGUF file. CPU inference is the default; set `LLAMA_N_GPU_LAYERS` to configure GPU offloading when using a llama-cpp-python build with GPU support. `LLAMA_N_CTX` controls the context window and defaults to 8192 tokens.
 
 ---
 
