@@ -4,7 +4,9 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
 from peft import LoraConfig, get_peft_model
 
-BASE_MODEL = "/models/qwen_model"
+BASE_MODEL = os.environ.get(
+    "HF_BASE_MODEL", "Qwen/Qwen2.5-7B-Instruct"
+)
 DATASET_PATH = "dataset/train.jsonl"
 VAL_PATH = "dataset/val.jsonl"
 OUTPUT_DIR = "lora_adapter"
@@ -14,11 +16,10 @@ def train_lora_adapter():
     dataset = load_dataset("json", data_files={"train": DATASET_PATH, "validation": VAL_PATH})
 
     print("Loading model + tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
     model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL,
         torch_dtype=torch.float16,
-        local_files_only=True
     )
 
     print("Applying LoRA...")

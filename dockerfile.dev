@@ -6,8 +6,5 @@ WORKDIR /app
 # Copy only your application code
 COPY . .
 
-# Upgrade transformers to ensure compatibility with the latest features and fixes 
-RUN pip install --upgrade transformers
-
 # FastAPI with reload for instant iteration
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

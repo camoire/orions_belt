@@ -8,8 +8,13 @@ services:
     container_name: orionsbelt-dev
     ports:
       - "8000:8000"
+    environment:
+      QWEN_GGUF_PATH: /app/qwen_model/Qwen2.5-Coder-14B-Instruct-Q6_K.gguf
+      BLIP_MODEL_PATH: /app/blip_model
     volumes:
       - ./logs:/app/logs
       - ./dataset:/app/dataset
       - ./lora_adapter:/app/lora_adapter
+      - ./qwen_model:/app/qwen_model:ro
+      - ./blip_model:/app/blip_model:ro
     restart: unless-stopped
