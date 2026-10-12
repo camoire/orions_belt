@@ -29,7 +29,7 @@ from typing import Any, Iterator, Literal, Optional
 # Local Project Modules
 # -----------------------------
 from behavior_logger import log_interaction
-from memory import MemoryStore
+from memory import MemoryStore, MemoryExtractor
 from prompt_builder import build_messages
 from conversation_store import conversations
 from train_lora import train_lora_adapter
@@ -87,9 +87,25 @@ blip_model.eval()
 whisper_model = whisper.load_model("base")
 
 # -----------------------------
-# Memory Store
+# Generation Lock & Memory Store
 # -----------------------------
+generation_lock = Lock()  # prevent concurrent generate() on same model instance
+
 memory = MemoryStore()
+memory_extractor = MemoryExtractor(model=model, generation_lock=generation_lock)
+
+def extract_memories_background(user_text: str | None, assistant_text: str | None = None):
+    if not user_text:
+        return
+    try:
+        memory_extractor.extract_and_store(
+            memory_store=memory,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            source="automatic_extraction",
+        )
+    except Exception as exc:
+        print("Automatic memory extraction failed:", exc)
 
 # -----------------------------
 # Training state
@@ -102,7 +118,6 @@ training_state = {
 # -----------------------------
 # Helper: Generate from chat messages
 # -----------------------------
-generation_lock = Lock()  # prevent concurrent generate() on same model instance
 
 def generate_from_messages(messages: list[dict]) -> str:
     with generation_lock:
@@ -147,7 +162,8 @@ def prepare_openai_messages(messages: list[OpenAIMessage]) -> tuple[list[dict], 
         ""
     )
     if user_text:
-        memory_items = memory.retrieve(user_text)
+        # Retrieve top 5 memories ranked by relevance and importance score
+        memory_items = memory.retrieve(user_text, top_k=5)
         if memory_items:
             memory_context = "Relevant memory (untrusted context):\n" + "\n".join(
                 f"- {item}" for item in memory_items
@@ -213,6 +229,11 @@ def openai_stream(
 
     output = "".join(output_parts)
     log_interaction(user_text, None, None, output)
+    threading.Thread(
+        target=extract_memories_background,
+        args=(user_text, output),
+        daemon=True,
+    ).start()
     finish_chunk = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -276,6 +297,11 @@ async def openai_chat_completions(request: ChatCompletionRequest):
     choice = result["choices"][0]
     output = (choice["message"]["content"] or "").strip()
     log_interaction(user_text, None, None, output)
+    threading.Thread(
+        target=extract_memories_background,
+        args=(user_text, output),
+        daemon=True,
+    ).start()
     usage = result.get("usage") or {}
     return {
         "id": completion_id,
@@ -303,7 +329,7 @@ async def openai_chat_completions(request: ChatCompletionRequest):
 async def generate(user_text: str = Body(...), session_id: str = Body("default")):
     session_messages = conversations.get(session_id)
 
-    memory_items = memory.retrieve(user_text)
+    memory_items = memory.retrieve(user_text, top_k=5)
     build_messages(
         session_messages=session_messages,
         user_text=user_text,
@@ -318,6 +344,11 @@ async def generate(user_text: str = Body(...), session_id: str = Body("default")
     session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(user_text, None, None, output)
+    threading.Thread(
+        target=extract_memories_background,
+        args=(user_text, output),
+        daemon=True,
+    ).start()
     return {"session_id": session_id, "generated_text": output}
 
 # -----------------------------
@@ -334,12 +365,13 @@ async def generate_from_image(file: UploadFile = File(...), session_id: str = "d
     caption_ids = blip_model.generate(**inputs, max_length=64)
     image_description = processor.decode(caption_ids[0], skip_special_tokens=True)
 
+    memory_items = memory.retrieve(image_description, top_k=5) if image_description else []
     build_messages(
         session_messages=session_messages,
         user_text=None,
         image_description=image_description,
         voice_text=None,
-        memory_items=[]
+        memory_items=memory_items
     )
 
     output = generate_from_messages(session_messages)
@@ -363,18 +395,24 @@ async def generate_from_voice(file: UploadFile = File(...), session_id: str = "d
     result = whisper_model.transcribe(audio_path)
     voice_text = result["text"]
 
+    memory_items = memory.retrieve(voice_text, top_k=5) if voice_text else []
     build_messages(
         session_messages=session_messages,
         user_text=None,
         image_description=None,
         voice_text=voice_text,
-        memory_items=[]
+        memory_items=memory_items
     )
 
     output = generate_from_messages(session_messages)
     session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(None, None, voice_text, output)
+    threading.Thread(
+        target=extract_memories_background,
+        args=(voice_text, output),
+        daemon=True,
+    ).start()
     return {"session_id": session_id, "transcription": voice_text, "generated_text": output}
 
 # -----------------------------
@@ -387,17 +425,28 @@ async def reset_session(session_id: str = Body(...)):
 
 class MemoryAddRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=10_000)
+    importance: Optional[float] = Field(default=5.0, ge=1.0, le=10.0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 class MemoryAddResponse(BaseModel):
     id: str
+    status: str = "created"
+
+class MemoryUpdateRequest(BaseModel):
+    text: Optional[str] = Field(default=None, min_length=1, max_length=10_000)
+    importance: Optional[float] = Field(default=None, ge=1.0, le=10.0)
+    metadata: Optional[dict[str, Any]] = None
 
 class MemorySearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=10_000)
     top_k: int = Field(default=5, ge=1, le=20)
+    min_importance: Optional[float] = Field(default=1.0, ge=1.0, le=10.0)
 
 class MemorySearchItem(BaseModel):
+    id: Optional[str] = None
     text: str
+    importance: Optional[float] = None
+    score: Optional[float] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     distance: Optional[float] = None
 
@@ -405,16 +454,31 @@ class MemoryListResponse(BaseModel):
     items: list[dict[str, Any]]
     limit: int
     offset: int
+    total: int
+
+class MemoryExtractRequest(BaseModel):
+    text: Optional[str] = Field(default=None, max_length=10_000)
+    user_text: Optional[str] = Field(default=None, max_length=10_000)
+    assistant_text: Optional[str] = Field(default=None, max_length=10_000)
+    auto_store: bool = True
+
+class ExtractedMemoryItem(BaseModel):
+    id: Optional[str] = None
+    text: str
+    importance: float
+
+class MemoryExtractResponse(BaseModel):
+    memories: list[ExtractedMemoryItem]
+    count: int
 
 @app.post("/memory/memory_add", response_model=MemoryAddResponse)
 async def memory_add(req: MemoryAddRequest):
-    memory_id = memory.add(req.text, req.metadata)
-    return MemoryAddResponse(id=memory_id)
+    memory_id = memory.add(req.text, metadata=req.metadata, importance=req.importance)
+    return MemoryAddResponse(id=memory_id, status="created")
 
 @app.post("/memory/memory_search", response_model=list[MemorySearchItem])
 async def memory_search(req: MemorySearchRequest):
-    results = memory.search(req.query, top_k=req.top_k)
-    # results already shaped as dicts; coerce to Pydantic output
+    results = memory.search(req.query, top_k=req.top_k, min_importance=req.min_importance or 1.0)
     return [MemorySearchItem(**r) for r in results]
 
 @app.get("/memory/memory_list", response_model=MemoryListResponse)
@@ -422,16 +486,85 @@ async def memory_list(limit: int = 50, offset: int = 0):
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     items = memory.list_memories(limit=limit, offset=offset)
-    return MemoryListResponse(items=items, limit=limit, offset=offset)
+    total = memory.count()
+    return MemoryListResponse(items=items, limit=limit, offset=offset, total=total)
+
+@app.get("/memory/{memory_id}")
+async def memory_get(memory_id: str):
+    item = memory.get(memory_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
+    return item
+
+@app.put("/memory/{memory_id}")
+async def memory_update(memory_id: str, req: MemoryUpdateRequest):
+    existing = memory.get(memory_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
+    success = memory.update(
+        memory_id=memory_id,
+        text=req.text,
+        metadata=req.metadata,
+        importance=req.importance,
+    )
+    return {"status": "updated" if success else "failed", "id": memory_id}
 
 @app.delete("/memory/{memory_id}")
 async def memory_delete(memory_id: str):
-    # Optional: check existence first
     existing = memory.get(memory_id)
     if existing is None:
         return {"status": "not_found", "id": memory_id}
     memory.delete(memory_id)
     return {"status": "deleted", "id": memory_id}
+
+@app.post("/memory/memory_extract", response_model=MemoryExtractResponse)
+async def memory_extract(req: MemoryExtractRequest):
+    target_user_text = req.user_text or req.text or ""
+    if not target_user_text.strip():
+        return MemoryExtractResponse(memories=[], count=0)
+    if req.auto_store:
+        stored = memory_extractor.extract_and_store(
+            memory_store=memory,
+            user_text=target_user_text,
+            assistant_text=req.assistant_text,
+            source="manual_extraction",
+        )
+        items = [ExtractedMemoryItem(**s) for s in stored]
+    else:
+        extracted = memory_extractor.extract(
+            user_text=target_user_text,
+            assistant_text=req.assistant_text,
+        )
+        items = [ExtractedMemoryItem(text=e["text"], importance=e["importance"]) for e in extracted]
+    return MemoryExtractResponse(memories=items, count=len(items))
+
+@app.get("/memory/stats")
+async def memory_stats():
+    total = memory.count()
+    items = memory.list_memories(limit=200)
+    avg_imp = 0.0
+    if items:
+        avg_imp = sum(m.get("importance", 5.0) for m in items) / len(items)
+    return {
+        "total_memories": total,
+        "sample_size": len(items),
+        "average_importance": round(avg_imp, 2),
+    }
+
+# -----------------------------
+# Open WebUI Compatibility Endpoints
+# -----------------------------
+@app.get("/api/v1/memories")
+async def openwebui_list_memories(limit: int = 50, offset: int = 0):
+    return await memory_list(limit=limit, offset=offset)
+
+@app.post("/api/v1/memories")
+async def openwebui_add_memory(req: MemoryAddRequest):
+    return await memory_add(req)
+
+@app.delete("/api/v1/memories/{memory_id}")
+async def openwebui_delete_memory(memory_id: str):
+    return await memory_delete(memory_id)
 
 # -----------------------------
 # Endpoint: Train LoRA
@@ -481,6 +614,7 @@ def reload_lora():
                 old_model.close()
             gc.collect()
             model = load_qwen_model()
+            memory_extractor.model = model
         except Exception as exc:
             print(f"GGUF model reload failed: {exc}")
             raise HTTPException(
