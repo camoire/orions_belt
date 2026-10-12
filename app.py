@@ -129,7 +129,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = Field(..., min_length=1)
     messages: list[OpenAIMessage] = Field(..., min_length=1)
     temperature: Optional[float] = Field(default=None, ge=0, le=2)
-    top_p: Optional[float] = Field(default=None, gt=0, le=1)
+    top_p: Optional[float] = Field(default=None, ge=0, le=1)
     max_tokens: Optional[int] = Field(default=None, ge=1)
     max_completion_tokens: Optional[int] = Field(default=None, ge=1)
     stop: Optional[str | list[str]] = None
@@ -137,7 +137,7 @@ class ChatCompletionRequest(BaseModel):
 
 
 def prepare_openai_messages(messages: list[OpenAIMessage]) -> tuple[list[dict], str]:
-    prompt_messages = [message.model_dump() for message in messages]
+    prompt_messages = [message.dict() for message in messages]
     user_text = next(
         (message.content for message in reversed(prompt_messages) if message["role"] == "user"),
         "",
@@ -145,14 +145,17 @@ def prepare_openai_messages(messages: list[OpenAIMessage]) -> tuple[list[dict], 
     if user_text:
         memory_items = memory.retrieve(user_text)
         if memory_items:
-            prompt_messages.insert(
-                0,
-                {
-                    "role": "system",
-                    "content": "Relevant memory (untrusted context):\n"
-                    + "\n".join(f"- {item}" for item in memory_items),
-                },
+            memory_context = "Relevant memory (untrusted context):\n" + "\n".join(
+                f"- {item}" for item in memory_items
             )
+            system_message = next(
+                (message for message in prompt_messages if message["role"] in ("system", "developer")),
+                None,
+            )
+            if system_message:
+                system_message["content"] += "\n\n" + memory_context
+            else:
+                prompt_messages.insert(0, {"role": "system", "content": memory_context})
     return prompt_messages, user_text
 
 
@@ -269,7 +272,7 @@ async def openai_chat_completions(request: ChatCompletionRequest):
     choice = result["choices"][0]
     output = (choice["message"]["content"] or "").strip()
     log_interaction(user_text, None, None, output)
-    usage = result.get("usage", {})
+    usage = result.get("usage") or {}
     return {
         "id": completion_id,
         "object": "chat.completion",
