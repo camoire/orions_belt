@@ -120,17 +120,20 @@ After downloading the models:
 docker build -t orions_belt .
 ```
 
-This build is fast because:
+The model files are mounted at runtime rather than copied into the image:
 
-- No model downloads occur inside Docker  
-- Everything is copied from your host  
+- No model downloads occur inside Docker
+- The image does not contain the large GGUF or BLIP model files
 
 ---
 
 # 🚀 8. Run the Container
 
 ```
-docker run -p 8000:8000 orions_belt
+docker run -p 8000:8000 \
+  -v "$(pwd)/qwen_model:/app/qwen_model:ro" \
+  -v "$(pwd)/blip_model:/app/blip_model:ro" \
+  orions_belt
 ```
 
 Open the API docs:

@@ -11,7 +11,7 @@ from threading import Lock
 # Third‑Party Libraries
 # -----------------------------
 import whisper
-from fastapi import FastAPI, File, UploadFile, Body
+from fastapi import FastAPI, File, HTTPException, UploadFile, Body
 from llama_cpp import Llama
 from PIL import Image
 from transformers import (
@@ -101,6 +101,11 @@ generation_lock = Lock()  # prevent concurrent generate() on same model instance
 
 def generate_from_messages(messages: list[dict]) -> str:
     with generation_lock:
+        if model is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Qwen GGUF model is unavailable; reload the model and try again.",
+            )
         result = model.create_chat_completion(
             messages=messages,
             max_tokens=256,
@@ -288,11 +293,15 @@ async def training_status():
 async def reload_lora():
     global model
     with generation_lock:
-        if model is not None:
-            model.close()
-        model = None
-        gc.collect()
-        model = load_qwen_model()
+        try:
+            old_model = model
+            model = None
+            if old_model is not None:
+                old_model.close()
+            gc.collect()
+            model = load_qwen_model()
+        except Exception as exc:
+            return {"status": f"error reloading GGUF model: {exc}"}
     if LLAMA_LORA_PATH:
         return {"status": "GGUF model reloaded with llama.cpp LoRA adapter"}
     return {"status": "GGUF model reloaded without a LoRA adapter"}

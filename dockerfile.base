@@ -9,14 +9,4 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy local Qwen GGUF model into the image
-COPY qwen_model/ /models/qwen_model
-
-# Copy local BLIP model into the image
-COPY blip_model /models/blip_model
-
-# Explicit local model paths
-ENV QWEN_GGUF_PATH=/models/qwen_model/Qwen2.5-Coder-14B-Instruct-Q6_K.gguf
-ENV BLIP_MODEL_PATH=/models/blip_model
-
 CMD ["bash"]

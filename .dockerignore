@@ -30,3 +30,7 @@ Thumbs.db
 # Ignore runtime data
 logs/
 chroma_db/
+dataset/
+lora_adapter/
+qwen_model/
+blip_model/
