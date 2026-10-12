@@ -186,6 +186,15 @@ http://localhost:8000/docs
 
 # 🔧 API Endpoints
 
+### **OpenAI-compatible API**
+
+Configure a GUI such as Open WebUI with the API base URL `http://localhost:8000/v1`
+and the model name `orions-belt` (or the value of `OPENAI_MODEL_ID`). An API key
+is not required by this local server; if the GUI requires one, enter a placeholder.
+The server supports `GET /v1/models` and `POST /v1/chat/completions`, including
+streaming chat responses. Chat messages must contain text; image and audio input
+remain available through the dedicated endpoints below.
+
 ### **POST /generate**
 Generate a response using the model + memory.
 

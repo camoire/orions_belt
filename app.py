@@ -3,8 +3,11 @@
 # -----------------------------
 import io
 import gc
+import json
 import os
 import threading
+import time
+import uuid
 from threading import Lock
 
 # -----------------------------
@@ -12,6 +15,7 @@ from threading import Lock
 # -----------------------------
 import whisper
 from fastapi import FastAPI, File, HTTPException, UploadFile, Body
+from fastapi.responses import StreamingResponse
 from llama_cpp import Llama
 from PIL import Image
 from transformers import (
@@ -19,7 +23,7 @@ from transformers import (
     BlipProcessor,
 )
 from pydantic import BaseModel, Field
-from typing import Any, Optional
+from typing import Any, Iterator, Literal, Optional
 
 # -----------------------------
 # Local Project Modules
@@ -31,6 +35,7 @@ from conversation_store import conversations
 from train_lora import train_lora_adapter
 
 app = FastAPI()
+OPENAI_MODEL_ID = os.environ.get("OPENAI_MODEL_ID", "orions-belt")
 
 # -----------------------------
 # Load Qwen GGUF model
@@ -112,8 +117,177 @@ def generate_from_messages(messages: list[dict]) -> str:
             temperature=0.7,
         )
     assistant_text = (result["choices"][0]["message"]["content"] or "").strip()
-    print("Generated text:", assistant_text)
     return assistant_text
+
+
+class OpenAIMessage(BaseModel):
+    role: Literal["system", "developer", "user", "assistant"]
+    content: str
+
+
+class ChatCompletionRequest(BaseModel):
+    model: str = Field(..., min_length=1)
+    messages: list[OpenAIMessage] = Field(..., min_length=1)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    top_p: Optional[float] = Field(default=None, gt=0, le=1)
+    max_tokens: Optional[int] = Field(default=None, ge=1)
+    max_completion_tokens: Optional[int] = Field(default=None, ge=1)
+    stop: Optional[str | list[str]] = None
+    stream: bool = False
+
+
+def prepare_openai_messages(messages: list[OpenAIMessage]) -> tuple[list[dict], str]:
+    prompt_messages = [message.model_dump() for message in messages]
+    user_text = next(
+        (message.content for message in reversed(prompt_messages) if message["role"] == "user"),
+        "",
+    )
+    if user_text:
+        memory_items = memory.retrieve(user_text)
+        if memory_items:
+            prompt_messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": "Relevant memory (untrusted context):\n"
+                    + "\n".join(f"- {item}" for item in memory_items),
+                },
+            )
+    return prompt_messages, user_text
+
+
+def openai_stream(
+    messages: list[dict],
+    user_text: str,
+    completion_id: str,
+    created: int,
+    model_name: str,
+    request: ChatCompletionRequest,
+) -> Iterator[str]:
+    output_parts = []
+    finish_reason = "stop"
+    with generation_lock:
+        if model is None:
+            raise RuntimeError("Qwen GGUF model is unavailable.")
+        chunks = model.create_chat_completion(
+            messages=messages,
+            max_tokens=request.max_completion_tokens or request.max_tokens or 256,
+            temperature=request.temperature if request.temperature is not None else 0.7,
+            top_p=request.top_p if request.top_p is not None else 1.0,
+            stop=request.stop,
+            stream=True,
+        )
+        role_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_name,
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(role_chunk)}\n\n"
+        for chunk in chunks:
+            choice = chunk["choices"][0]
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if content:
+                output_parts.append(content)
+                response_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [
+                        {"index": 0, "delta": {"content": content}, "finish_reason": None}
+                    ],
+                }
+                yield f"data: {json.dumps(response_chunk)}\n\n"
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+
+    output = "".join(output_parts)
+    log_interaction(user_text, None, None, output)
+    finish_chunk = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model_name,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+    }
+    yield f"data: {json.dumps(finish_chunk)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+@app.get("/v1/models")
+async def openai_list_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": OPENAI_MODEL_ID,
+                "object": "model",
+                "created": 0,
+                "owned_by": "orions-belt",
+            }
+        ],
+    }
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: ChatCompletionRequest):
+    messages, user_text = prepare_openai_messages(request.messages)
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Qwen GGUF model is unavailable; reload the model and try again.",
+        )
+
+    if request.stream:
+        return StreamingResponse(
+            openai_stream(
+                messages,
+                user_text,
+                completion_id,
+                created,
+                OPENAI_MODEL_ID,
+                request,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    with generation_lock:
+        result = model.create_chat_completion(
+            messages=messages,
+            max_tokens=request.max_completion_tokens or request.max_tokens or 256,
+            temperature=request.temperature if request.temperature is not None else 0.7,
+            top_p=request.top_p if request.top_p is not None else 1.0,
+            stop=request.stop,
+        )
+    choice = result["choices"][0]
+    output = (choice["message"]["content"] or "").strip()
+    log_interaction(user_text, None, None, output)
+    usage = result.get("usage", {})
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": OPENAI_MODEL_ID,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": output},
+                "finish_reason": choice.get("finish_reason") or "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        },
+    }
 
 # -----------------------------
 # Endpoint: Text Generation
