@@ -35,7 +35,7 @@ from conversation_store import conversations
 from train_lora import train_lora_adapter
 
 app = FastAPI()
-OPENAI_MODEL_ID = os.environ.get("OPENAI_MODEL_ID", "orions-belt")
+OPENAI_MODEL_ID = os.environ.get("OPENAI_MODEL_ID", "").strip() or "orions-belt"
 
 # -----------------------------
 # Load Qwen GGUF model
