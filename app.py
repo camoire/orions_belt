@@ -9,7 +9,6 @@ from threading import Lock
 # -----------------------------
 # Third‑Party Libraries
 # -----------------------------
-import torch
 import whisper
 from fastapi import FastAPI, File, UploadFile, Body
 from llama_cpp import Llama

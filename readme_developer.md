@@ -1,14 +1,13 @@
 # 📘 **Developer Onboarding Guide**
 
-Welcome to **OrionsBelt**, a self‑improving local AI assistant powered by:
+Welcome to **OrionsBelt**, a local AI assistant powered by:
 
-- Qwen2.5‑7B‑Instruct  
+- Qwen2.5-Coder-14B-Instruct Q6_K GGUF via llama.cpp
 - FastAPI  
-- LoRA continual fine‑tuning  
 - A memory + behavior logging system  
 - Docker for reproducible deployment  
 
-This guide walks you through everything you need to get the system running locally, train LoRA adapters, and build the production container.
+This guide walks you through getting the system running locally and building the production container.
 
 ---
 
@@ -54,7 +53,7 @@ pip install -r requirements.txt
 
 ---
 
-# 📥 4. Download the Qwen Model (One‑Time Setup)
+# 📥 4. Download the Models (One‑Time Setup)
 
 Run the helper script:
 
@@ -64,21 +63,19 @@ python download_model.py
 
 This script downloads both required models into the project:
 
-- Qwen2.5‑7B‑Instruct into `qwen_model/`
+- `Qwen2.5-Coder-14B-Instruct-Q6_K.gguf` from `bartowski/Qwen2.5-Coder-14B-Instruct-GGUF` into `qwen_model/`
 - BLIP image captioning model into `blip_model/`
 
-The files are placed where the application and Docker image expect them. The script downloads model files without loading the full Qwen model into memory.
+The Qwen GGUF is loaded locally by llama.cpp. CPU inference is the default. Set `QWEN_GGUF_PATH` to select another GGUF file or `LLAMA_N_GPU_LAYERS` when using a GPU-enabled llama-cpp-python build.
 
 After this step, your project will contain:
 
 ```
 qwen_model/
-    models--Qwen--Qwen2.5-7B-Instruct/
-        snapshots/<hash>/
-            model.safetensors
-            tokenizer.json
-            config.json
-            ...
+    Qwen2.5-Coder-14B-Instruct-Q6_K.gguf
+blip_model/
+    config.json
+    ...
 ```
 
 ---
@@ -101,26 +98,7 @@ dataset/val.jsonl
 
 ---
 
-# 🧠 6. Train a LoRA Adapter
-
-Run:
-
-```
-python train_lora.py
-```
-
-This creates:
-
-```
-lora_adapter/
-    adapter_config.json
-    adapter_model.safetensors
-    ...
-```
-
----
-
-# 🔄 7. Hot‑Reload the LoRA Adapter (No Restart Needed)
+# 🔄 6. Reload the GGUF Model
 
 Once the FastAPI service is running, call:
 
@@ -128,13 +106,13 @@ Once the FastAPI service is running, call:
 POST http://localhost:8000/reload-lora
 ```
 
-This reloads the adapter instantly.
+This reloads the GGUF model. To apply a LoRA adapter, set `LLAMA_LORA_PATH` to a llama.cpp-compatible GGUF adapter. Transformers PEFT adapter files from the legacy trainer are not compatible directly.
 
 ---
 
-# 🛠️ 8. Build the Docker Image
+# 🛠️ 7. Build the Docker Image
 
-After downloading the models, and optionally training a LoRA adapter:
+After downloading the models:
 
 ```
 docker build -t orions_belt .
@@ -147,7 +125,7 @@ This build is fast because:
 
 ---
 
-# 🚀 9. Run the Container
+# 🚀 8. Run the Container
 
 ```
 docker run -p 8000:8000 orions_belt
@@ -163,32 +141,26 @@ http://localhost:8000/docs
 
 ---
 
-# 🔧 10. Key API Endpoints
+# 🔧 9. Key API Endpoints
 
 ### **POST /generate**
 Generate a response using the model + memory.
 
-### **POST /train-now**
-Triggers LoRA training in the background.
-
 ### **POST /reload-lora**
-Reloads the LoRA adapter without restarting the container.
+Reloads the GGUF model and any configured llama.cpp-compatible adapter.
 
 ---
 
-# 🧭 11. Typical Developer Workflow
+# 🧭 10. Typical Developer Workflow
 
 1. Pull latest code
 2. Run `download_model.py` (only once per machine)
-3. Start FastAPI locally and generate interaction logs
-4. Run `build_dataset.py`
-5. Run `train_lora.py` (optional)
-6. Build and run the Docker image
-7. Call `/reload-lora` to load an updated adapter
+3. Build the Docker image
+4. Run the container and use the API
 
 ---
 
-# 🎯 12. Troubleshooting
+# 🎯 11. Troubleshooting
 
 ### **Model download is slow**
 Set your HF token:
@@ -200,7 +172,7 @@ $env:HF_TOKEN = "hf_xxx"
 Ensure you ran `download_model.py` first.
 
 ### **LoRA not loading**
-Check that `lora_adapter/` exists and call `/reload-lora`.
+`/reload-lora` accepts a llama.cpp-compatible GGUF adapter via `LLAMA_LORA_PATH`; Transformers PEFT adapter files are not compatible directly.
 
 ### **FastAPI not responding**
 Ensure port 8000 isn’t in use.
