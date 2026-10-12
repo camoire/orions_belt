@@ -139,8 +139,12 @@ class ChatCompletionRequest(BaseModel):
 def prepare_openai_messages(messages: list[OpenAIMessage]) -> tuple[list[dict], str]:
     prompt_messages = [message.dict() for message in messages]
     user_text = next(
-        (message.content for message in reversed(prompt_messages) if message["role"] == "user"),
-        "",
+        (
+            message["content"]
+            for message in reversed(prompt_messages)
+            if message["role"] == "user"
+        ),
+        ""
     )
     if user_text:
         memory_items = memory.retrieve(user_text)
