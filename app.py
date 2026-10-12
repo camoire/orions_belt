@@ -290,7 +290,7 @@ async def training_status():
 # Endpoint: Reload LoRA
 # -----------------------------
 @app.post("/reload-lora")
-async def reload_lora():
+def reload_lora():
     global model
     with generation_lock:
         try:
