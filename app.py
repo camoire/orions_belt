@@ -2,6 +2,7 @@
 # Standard Library Imports
 # -----------------------------
 import io
+import gc
 import os
 import threading
 from threading import Lock
@@ -287,6 +288,10 @@ async def training_status():
 async def reload_lora():
     global model
     with generation_lock:
+        if model is not None:
+            model.close()
+        model = None
+        gc.collect()
         model = load_qwen_model()
     if LLAMA_LORA_PATH:
         return {"status": "GGUF model reloaded with llama.cpp LoRA adapter"}

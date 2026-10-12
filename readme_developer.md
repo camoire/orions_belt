@@ -96,6 +96,8 @@ dataset/train.jsonl
 dataset/val.jsonl
 ```
 
+The app still exposes `/train-now`, `/training-status`, and `/train-and-reload` for the legacy Transformers trainer. It trains a separate Hugging Face Qwen checkpoint; those PEFT adapters are not compatible with GGUF inference and are not loaded by the GGUF server.
+
 ---
 
 # 🔄 6. Reload the GGUF Model
@@ -145,6 +147,12 @@ http://localhost:8000/docs
 
 ### **POST /generate**
 Generate a response using the model + memory.
+
+### **POST /train-now** and **GET /training-status**
+Run and check the legacy Transformers training workflow. Its adapters are not used for GGUF inference.
+
+### **POST /train-and-reload**
+Runs legacy Transformers training; the resulting adapter is not loaded into the GGUF model.
 
 ### **POST /reload-lora**
 Reloads the GGUF model and any configured llama.cpp-compatible adapter.
