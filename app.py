@@ -17,6 +17,7 @@ from threading import Lock
 import whisper
 from fastapi import FastAPI, File, HTTPException, UploadFile, Body, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from llama_cpp import Llama
 from PIL import Image
 from transformers import (
@@ -436,18 +437,22 @@ async def openai_chat_completions(request: ChatCompletionRequest):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    output_choices = []
-    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    with generation_lock:
-        for _ in range(request.n or 1):
-            result = model.create_chat_completion(
-                messages=messages, **chat_completion_options(request)
-            )
-            for choice in result.get("choices", []):
-                output_choices.append({**choice, "index": len(output_choices)})
-            result_usage = result.get("usage") or {}
-            for field in usage:
-                usage[field] += result_usage.get(field, 0)
+    def generate_choices():
+        output_choices = []
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        with generation_lock:
+            for _ in range(request.n or 1):
+                result = model.create_chat_completion(
+                    messages=messages, **chat_completion_options(request)
+                )
+                for choice in result.get("choices", []):
+                    output_choices.append({**choice, "index": len(output_choices)})
+                result_usage = result.get("usage") or {}
+                for field in usage:
+                    usage[field] += result_usage.get(field, 0)
+        return output_choices, usage
+
+    output_choices, usage = await run_in_threadpool(generate_choices)
     if not output_choices:
         raise HTTPException(status_code=502, detail="The model returned no completion choices.")
     output = (output_choices[0].get("message", {}).get("content") or "")
@@ -594,29 +599,35 @@ async def openai_completions(request: CompletionRequest):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    choices = []
-    prompt_tokens = 0
-    completion_tokens = 0
-    output_count = 0
-    with generation_lock:
-        for prompt_index, prompt in enumerate(prompts):
-            for choice_index in range(request.n):
-                result = model.create_completion(
-                    prompt=prompt,
-                    **text_completion_options(request),
-                )
-                prompt_tokens += (result.get("usage") or {}).get("prompt_tokens", 0)
-                completion_tokens += (result.get("usage") or {}).get("completion_tokens", 0)
-                for choice in result.get("choices", []):
-                    output_count += 1
-                    text = choice.get("text", "")
-                    choices.append({
-                        "text": text,
-                        "index": prompt_index * request.n + choice_index,
-                        "logprobs": choice.get("logprobs"),
-                        "finish_reason": choice.get("finish_reason") or "stop",
-                    })
-                    log_interaction(str(prompt), None, None, text)
+    def generate_completions():
+        choices = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        output_count = 0
+        with generation_lock:
+            for prompt_index, prompt in enumerate(prompts):
+                for choice_index in range(request.n):
+                    result = model.create_completion(
+                        prompt=prompt,
+                        **text_completion_options(request),
+                    )
+                    prompt_tokens += (result.get("usage") or {}).get("prompt_tokens", 0)
+                    completion_tokens += (result.get("usage") or {}).get("completion_tokens", 0)
+                    for choice in result.get("choices", []):
+                        output_count += 1
+                        text = choice.get("text", "")
+                        choices.append({
+                            "text": text,
+                            "index": prompt_index * request.n + choice_index,
+                            "logprobs": choice.get("logprobs"),
+                            "finish_reason": choice.get("finish_reason") or "stop",
+                        })
+                        log_interaction(str(prompt), None, None, text)
+        return choices, prompt_tokens, completion_tokens, output_count
+
+    choices, prompt_tokens, completion_tokens, output_count = await run_in_threadpool(
+        generate_completions
+    )
     if not output_count:
         raise HTTPException(status_code=502, detail="The model returned no completion choices.")
     return {
@@ -648,7 +659,7 @@ async def generate(user_text: str = Body(...), session_id: str = Body("default")
         memory_items=memory_items
     )
 
-    output = generate_from_messages(session_messages)
+    output = await run_in_threadpool(generate_from_messages, session_messages)
 
     # Append assistant reply for the next turn (core multi-turn step) [1](https://qwen.readthedocs.io/en/v2.0/inference/chat.html)
     session_messages.append({"role": "assistant", "content": output})
@@ -671,9 +682,12 @@ async def generate_from_image(file: UploadFile = File(...), session_id: str = "d
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    inputs = processor(images=image, return_tensors="pt")
-    caption_ids = blip_model.generate(**inputs, max_length=64)
-    image_description = processor.decode(caption_ids[0], skip_special_tokens=True)
+    def caption_image():
+        inputs = processor(images=image, return_tensors="pt")
+        caption_ids = blip_model.generate(**inputs, max_length=64)
+        return processor.decode(caption_ids[0], skip_special_tokens=True)
+
+    image_description = await run_in_threadpool(caption_image)
 
     memory_items = memory.retrieve(image_description, top_k=5) if image_description else []
     build_messages(
@@ -684,7 +698,7 @@ async def generate_from_image(file: UploadFile = File(...), session_id: str = "d
         memory_items=memory_items
     )
 
-    output = generate_from_messages(session_messages)
+    output = await run_in_threadpool(generate_from_messages, session_messages)
     session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(None, image_description, None, output)
@@ -699,11 +713,12 @@ async def generate_from_voice(file: UploadFile = File(...), session_id: str = "d
 
     audio_bytes = await file.read()
     audio_path = "temp_audio.wav"
-    with open(audio_path, "wb") as f:
-        f.write(audio_bytes)
+    def transcribe_audio():
+        with open(audio_path, "wb") as f:
+            f.write(audio_bytes)
+        return whisper_model.transcribe(audio_path)["text"]
 
-    result = whisper_model.transcribe(audio_path)
-    voice_text = result["text"]
+    voice_text = await run_in_threadpool(transcribe_audio)
 
     memory_items = memory.retrieve(voice_text, top_k=5) if voice_text else []
     build_messages(
@@ -714,7 +729,7 @@ async def generate_from_voice(file: UploadFile = File(...), session_id: str = "d
         memory_items=memory_items
     )
 
-    output = generate_from_messages(session_messages)
+    output = await run_in_threadpool(generate_from_messages, session_messages)
     session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(None, None, voice_text, output)
