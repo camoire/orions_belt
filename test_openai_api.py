@@ -1,7 +1,7 @@
 import asyncio
 import importlib
 import sys
-import time
+import threading
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -127,9 +127,18 @@ class TestOpenAIAPI(unittest.TestCase):
         self.assertEqual(kwargs["seed"], 123)
 
     def test_chat_completion_does_not_block_the_event_loop(self):
-        self.model.create_chat_completion.side_effect = lambda **_: (
-            time.sleep(0.05) or {"choices": [{"message": {"content": "hello"}}], "usage": {}}
-        )
+        started = threading.Event()
+        release = threading.Event()
+        original_lock = app_module.generation_lock
+        app_module.generation_lock = threading.Lock()
+        self.addCleanup(setattr, app_module, "generation_lock", original_lock)
+
+        def slow_completion(**_):
+            started.set()
+            release.wait(timeout=1)
+            return {"choices": [{"message": {"content": "hello"}}], "usage": {}}
+
+        self.model.create_chat_completion.side_effect = slow_completion
         request = app_module.ChatCompletionRequest(
             model=app_module.OPENAI_MODEL_ID,
             messages=[{"role": "user", "content": "hello"}],
@@ -138,7 +147,8 @@ class TestOpenAIAPI(unittest.TestCase):
         async def check_responsiveness():
             completion = asyncio.create_task(app_module.openai_chat_completions(request))
             await asyncio.sleep(0.01)
-            is_responsive = not completion.done()
+            is_responsive = started.is_set() and not completion.done()
+            release.set()
             await completion
             return is_responsive
 
