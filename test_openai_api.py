@@ -152,6 +152,55 @@ class TestOpenAIAPI(unittest.TestCase):
                 temperature=3,
             )
 
+    def test_chat_completion_repeats_choices_without_backend_n(self):
+        self.model.create_chat_completion.return_value = {
+            "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        }
+        request = app_module.ChatCompletionRequest(
+            model=app_module.OPENAI_MODEL_ID,
+            messages=[{"role": "user", "content": "hello"}],
+            n=2,
+        )
+
+        response = asyncio.run(app_module.openai_chat_completions(request))
+
+        self.assertEqual([choice["index"] for choice in response["choices"]], [0, 1])
+        self.assertEqual(self.model.create_chat_completion.call_count, 2)
+        self.assertTrue(all("n" not in call.kwargs for call in self.model.create_chat_completion.call_args_list))
+
+    def test_chat_completion_requires_content_and_rejects_unsupported_fields(self):
+        request = app_module.ChatCompletionRequest(
+            model=app_module.OPENAI_MODEL_ID,
+            messages=[
+                {"role": "system"},
+                {"role": "user", "content": "hello"},
+            ],
+        )
+        with self.assertRaises(HTTPException) as error:
+            asyncio.run(app_module.openai_chat_completions(request))
+        self.assertEqual(error.exception.status_code, 400)
+
+        for options in ({"parallel_tool_calls": False}, {"stream_options": {"include_usage": True}}):
+            request = app_module.ChatCompletionRequest(
+                model=app_module.OPENAI_MODEL_ID,
+                messages=[{"role": "user", "content": "hello"}],
+                **options,
+            )
+            with self.assertRaises(HTTPException) as error:
+                asyncio.run(app_module.openai_chat_completions(request))
+            self.assertEqual(error.exception.status_code, 400)
+
+    def test_chat_completion_accepts_legacy_function_results(self):
+        request = app_module.ChatCompletionRequest(
+            model=app_module.OPENAI_MODEL_ID,
+            messages=[
+                {"role": "assistant", "function_call": {"name": "lookup", "arguments": "{}"}},
+                {"role": "function", "name": "lookup", "content": "result"},
+            ],
+        )
+        app_module.prepare_openai_messages(request.messages)
+
     def test_chat_completion_stream_emits_deltas_and_done(self):
         self.model.create_chat_completion.return_value = iter([
             {"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]},
@@ -173,6 +222,33 @@ class TestOpenAIAPI(unittest.TestCase):
         self.assertIn(b'"object": "chat.completion.chunk"', payload)
         self.assertIn(b'"content": "hello"', payload)
         self.assertIn(b"data: [DONE]", payload)
+
+    def test_chat_completion_stream_repeats_choices_with_distinct_indexes(self):
+        self.model.create_chat_completion.side_effect = [
+            iter([{"choices": [{"delta": {"content": "first"}, "finish_reason": "stop"}]}]),
+            iter([{"choices": [{"delta": {"content": "second"}, "finish_reason": "stop"}]}]),
+        ]
+        request = app_module.ChatCompletionRequest(
+            model=app_module.OPENAI_MODEL_ID,
+            messages=[{"role": "user", "content": "hello"}],
+            n=2,
+            stream=True,
+        )
+
+        payload = "".join(app_module.openai_stream(
+            [{"role": "user", "content": "hello"}],
+            "hello",
+            "chatcmpl-1",
+            1,
+            app_module.OPENAI_MODEL_ID,
+            request,
+        ))
+
+        self.assertIn('"index": 0', payload)
+        self.assertIn('"index": 1', payload)
+        self.assertTrue(all(
+            "n" not in call.kwargs for call in self.model.create_chat_completion.call_args_list
+        ))
 
     def test_legacy_completion_returns_text_shape_and_usage(self):
         self.model.create_completion.return_value = {
@@ -214,6 +290,26 @@ class TestOpenAIAPI(unittest.TestCase):
             ["one", "two"],
         )
 
+    def test_legacy_completion_repeats_choices_without_unsupported_arguments(self):
+        self.model.create_completion.return_value = {
+            "choices": [{"text": "answer"}],
+            "usage": {},
+        }
+        request = app_module.CompletionRequest(
+            model=app_module.OPENAI_MODEL_ID,
+            prompt="hello",
+            n=2,
+        )
+
+        response = asyncio.run(app_module.openai_completions(request))
+
+        self.assertEqual([choice["index"] for choice in response["choices"]], [0, 1])
+        self.assertEqual(self.model.create_completion.call_count, 2)
+        self.assertTrue(all(
+            "n" not in call.kwargs and "best_of" not in call.kwargs
+            for call in self.model.create_completion.call_args_list
+        ))
+
     def test_legacy_completion_stream_and_token_prompts(self):
         self.model.create_completion.return_value = iter([
             {"choices": [{"text": "token", "index": 0, "finish_reason": None}]},
@@ -252,6 +348,40 @@ class TestOpenAIAPI(unittest.TestCase):
         with self.assertRaises(HTTPException) as error:
             asyncio.run(app_module.openai_completions(invalid_best_of))
         self.assertEqual(error.exception.status_code, 400)
+
+    def test_request_work_budget_limits_prompt_batches_and_compute(self):
+        with self.assertRaises(HTTPException):
+            app_module.enforce_request_work([1] * (app_module.MAX_REQUEST_PROMPTS + 1), 1, 1)
+        with self.assertRaises(HTTPException):
+            app_module.enforce_request_work([1000], 10, 1000)
+
+    def test_chat_completion_rejects_excessive_work_before_memory_retrieval(self):
+        request = app_module.ChatCompletionRequest(
+            model=app_module.OPENAI_MODEL_ID,
+            messages=[{"role": "user", "content": "x" * 140_000}],
+        )
+
+        with self.assertRaises(HTTPException):
+            asyncio.run(app_module.openai_chat_completions(request))
+
+        app_module.memory.retrieve.assert_not_called()
+
+    def test_openai_authentication_is_optional_or_requires_bearer_key(self):
+        class Request:
+            url = types.SimpleNamespace(path="/v1/models")
+            headers = {}
+
+        async def call_next(_request):
+            return "allowed"
+
+        with patch.object(app_module, "OPENAI_API_KEY", "configured-key"):
+            denied = asyncio.run(app_module.authenticate_openai_requests(Request(), call_next))
+            self.assertEqual(denied.status_code, 401)
+            Request.headers = {"authorization": "Bearer " + "configured" + "-key"}
+            self.assertEqual(
+                asyncio.run(app_module.authenticate_openai_requests(Request(), call_next)),
+                "allowed",
+            )
 
 
 if __name__ == "__main__":
