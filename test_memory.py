@@ -220,6 +220,18 @@ class TestMemoryExtractor(unittest.TestCase):
         self.assertEqual(memories[0]["text"], "User works at OpenAI")
         self.assertEqual(memories[0]["importance"], 8.0)
 
+    def test_empty_llm_result_does_not_fall_back_to_heuristics(self):
+        mock_model = MagicMock()
+        mock_model.create_chat_completion.return_value = {
+            "choices": [{"message": {"content": "[]"}}]
+        }
+        extractor = MemoryExtractor(model=mock_model)
+
+        self.assertEqual(
+            extractor.extract("Can you remember that I live in Paris?"),
+            [],
+        )
+
     def test_extraction_ignores_assistant_reply_and_follow_up_questions(self):
         mock_model = MagicMock()
         mock_model.create_chat_completion.return_value = {

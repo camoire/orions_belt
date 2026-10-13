@@ -454,8 +454,7 @@ class MemoryExtractor:
                                 imp = float(item.get("importance", 5.0))
                                 imp = max(1.0, min(10.0, imp))
                                 items.append({"text": txt, "importance": imp})
-                    if items:
-                        return items
+                    return items
             except Exception:
                 pass
 
