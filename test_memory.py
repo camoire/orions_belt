@@ -220,6 +220,39 @@ class TestMemoryExtractor(unittest.TestCase):
         self.assertEqual(memories[0]["text"], "User works at OpenAI")
         self.assertEqual(memories[0]["importance"], 8.0)
 
+    def test_llm_extraction_ignores_topic_tags(self):
+        mock_model = MagicMock()
+        mock_model.create_chat_completion.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '[{"text": "Pets", "importance": 7}, '
+                            '{"text": "Dogs", "importance": 7}, '
+                            '{"text": "Pet Care", "importance": 6}, '
+                            '{"text": "Things I Like", "importance": 7}, '
+                            '{"text": "User has two dogs", "importance": 8}, '
+                            '{"text": "User travels by train", "importance": 8}, '
+                            '{"text": "User avoids gluten", "importance": 9}]'
+                        )
+                    }
+                }
+            ]
+        }
+        extractor = MemoryExtractor(model=mock_model)
+
+        memories = extractor.extract("I have two dogs.")
+
+        self.assertEqual(
+            memories,
+            [
+                {"text": "User has two dogs", "importance": 8.0},
+                {"text": "User travels by train", "importance": 8.0},
+                {"text": "User avoids gluten", "importance": 9.0},
+            ],
+        )
+        self.assertIn("Never extract topic labels, tags, categories", EXTRACTION_SYSTEM_PROMPT)
+
     def test_empty_llm_result_does_not_fall_back_to_heuristics(self):
         mock_model = MagicMock()
         mock_model.create_chat_completion.return_value = {
