@@ -297,12 +297,25 @@ EXTRACTION_SYSTEM_PROMPT = (
     "constraints, or goals about the user that are worth remembering long-term across chats, but "
     "only when the user explicitly states or confirms them. Do not infer facts from questions, "
     "requests, hypotheticals, or quoted text. Ignore generic conversation, greetings, and ephemeral "
-    "requests. "
-    "For each extracted memory, provide a concise declarative sentence (e.g. 'User is a backend engineer') "
+    "requests. Never extract topic labels, tags, categories, or keyword phrases (e.g. 'Pets', "
+    "'Dogs', or 'Pet Care'). "
+    "For each extracted memory, provide a concise complete declarative sentence (e.g. "
+    "'User is a backend engineer') "
     "and an importance score from 1 to 10 (1=minor detail, 10=critical identity/constraint/allergy). "
     "Respond ONLY with a valid JSON array of objects with 'text' and 'importance' keys: "
     '[{"text": "...", "importance": 8}]. If nothing is worth remembering, respond with [].'
 )
+
+_MEMORY_VERB_PATTERN = re.compile(
+    r"\b(?:am|is|are|was|were|be|been|being|have|has|had|do|does|did|"
+    r"can|could|will|would|should|might|must|prefer(?:s|red)?|like(?:s|d)?|"
+    r"love(?:s|d)?|hate(?:s|d)?|dislike(?:s|d)?|work(?:s|ed)?|live(?:s|d)?|"
+    r"use(?:s|d)?|know(?:s|n)?|speak(?:s|ing)?|write(?:s|ing)?|"
+    r"study|studies|own(?:s|ed)?|want(?:s|ed)?|need(?:s|ed)?|enjoy(?:s|ed)?|"
+    r"remember(?:s|ed)?|consider(?:s|ed)?)\b",
+    re.I,
+)
+
 
 _HEURISTIC_PATTERNS = [
     # Allergies and health constraints (top priority)
@@ -450,7 +463,7 @@ class MemoryExtractor:
                     for item in parsed:
                         if isinstance(item, dict) and "text" in item:
                             txt = str(item["text"]).strip()
-                            if txt:
+                            if txt and _MEMORY_VERB_PATTERN.search(txt):
                                 imp = float(item.get("importance", 5.0))
                                 imp = max(1.0, min(10.0, imp))
                                 items.append({"text": txt, "importance": imp})
