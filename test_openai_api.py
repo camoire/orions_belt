@@ -289,6 +289,22 @@ class TestOpenAIAPI(unittest.TestCase):
         )
         app_module.prepare_openai_messages(request.messages)
 
+    def test_chat_completion_prompt_hides_memory_action_payloads(self):
+        request = app_module.ChatCompletionRequest(
+            model=app_module.OPENAI_MODEL_ID,
+            messages=[
+                {"role": "system", "content": "Be helpful."},
+                {"role": "user", "content": "I have two dogs."},
+            ],
+        )
+
+        messages, _ = app_module.prepare_openai_messages(request.messages)
+
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("Be helpful.", messages[0]["content"])
+        self.assertIn("do not expose memory actions", messages[0]["content"])
+        self.assertEqual(messages[-1]["content"], "I have two dogs.")
+
     def test_chat_completion_stream_emits_deltas_and_done(self):
         self.model.create_chat_completion.return_value = iter([
             {"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]},
