@@ -226,7 +226,10 @@ OrionsBelt includes an intelligent long-term memory system with ChromaDB:
   - `GET /memory/stats`: Get total memory count and collection statistics
 
 ### **POST /generate**
-Generate a response using the model + memory.
+Generate a response using the model + memory. Include `"stream": true` in the JSON
+request body to receive Server-Sent Events (`text/event-stream`) instead of waiting
+for the completed JSON response. A `status` event is sent before inference starts,
+followed by `delta` events as text is generated and a final `done` event.
 
 ### **POST /train-now**
 Triggers the legacy Transformers LoRA training workflow. Its output cannot be loaded directly by GGUF inference.

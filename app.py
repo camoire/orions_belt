@@ -27,7 +27,7 @@ from transformers import (
     BlipProcessor,
 )
 from pydantic import BaseModel, Field
-from typing import Any, Iterator, Literal, Optional
+from typing import Any, AsyncIterator, Iterator, Literal, Optional
 
 # -----------------------------
 # Local Project Modules
@@ -192,6 +192,23 @@ def generate_from_messages(messages: list[dict]) -> str:
     return assistant_text
 
 
+def stream_from_messages(messages: list[dict]) -> Iterator[str]:
+    with generation_lock:
+        if model is None:
+            raise RuntimeError("Qwen GGUF model is unavailable.")
+        chunks = model.create_chat_completion(
+            messages=messages,
+            max_tokens=256,
+            temperature=0.7,
+            stream=True,
+        )
+        for chunk in chunks:
+            for choice in chunk.get("choices", []):
+                content = (choice.get("delta") or {}).get("content")
+                if content:
+                    yield content
+
+
 class OpenAIMessage(BaseModel):
     role: Literal["system", "developer", "user", "assistant", "tool", "function"]
     content: Optional[str | list[dict[str, Any]]] = None
@@ -330,9 +347,6 @@ def openai_stream(
         if model is None:
             raise RuntimeError("Qwen GGUF model is unavailable.")
         for choice_index in range(request.n or 1):
-            chunks = model.create_chat_completion(
-                messages=messages, stream=True, **chat_completion_options(request)
-            )
             role_chunk = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -345,6 +359,9 @@ def openai_stream(
                 }],
             }
             yield f"data: {json.dumps(role_chunk)}\n\n"
+            chunks = model.create_chat_completion(
+                messages=messages, stream=True, **chat_completion_options(request)
+            )
             for chunk in chunks:
                 for choice in chunk["choices"]:
                     delta = choice.get("delta") or {}
@@ -675,8 +692,63 @@ async def openai_completions(request: CompletionRequest):
 # -----------------------------
 # Endpoint: Text Generation
 # -----------------------------
+async def generate_stream(user_text: str, session_id: str) -> AsyncIterator[str]:
+    yield f"event: status\ndata: {json.dumps({'status': 'generating', 'session_id': session_id})}\n\n"
+    output_parts = []
+    async with get_session_lock(session_id):
+        session_messages = conversations.get(session_id)
+        memory_items = await run_in_threadpool(memory.retrieve, user_text, top_k=5)
+        build_messages(
+            session_messages=session_messages,
+            user_text=user_text,
+            image_description=None,
+            voice_text=None,
+            memory_items=memory_items,
+        )
+        chunks = await run_in_threadpool(stream_from_messages, list(session_messages))
+        while True:
+            content = await run_in_threadpool(next_stream_content, chunks)
+            if content is None:
+                break
+            output_parts.append(content)
+            yield f"event: delta\ndata: {json.dumps({'session_id': session_id, 'generated_text': content})}\n\n"
+        output = "".join(output_parts).strip()
+        session_messages.append({"role": "assistant", "content": output})
+
+    log_interaction(user_text, None, None, output)
+    threading.Thread(
+        target=extract_memories_background,
+        args=(user_text, output),
+        daemon=True,
+    ).start()
+    yield f"event: done\ndata: {json.dumps({'session_id': session_id, 'generated_text': output})}\n\n"
+
+
+def next_stream_content(chunks: Iterator[str]) -> Optional[str]:
+    try:
+        return next(chunks)
+    except StopIteration:
+        return None
+
+
 @app.post("/generate")
-async def generate(user_text: str = Body(...), session_id: str = Body("default")):
+async def generate(
+    user_text: str = Body(...),
+    session_id: str = Body("default"),
+    stream: bool = Body(False),
+):
+    if stream is True:
+        if model is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Qwen GGUF model is unavailable; reload the model and try again.",
+            )
+        return StreamingResponse(
+            generate_stream(user_text, session_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     async with get_session_lock(session_id):
         session_messages = conversations.get(session_id)
 
