@@ -293,9 +293,11 @@ class MemoryStore:
 # Automatic Memory Extraction
 # -----------------------------
 EXTRACTION_SYSTEM_PROMPT = (
-    "You are a memory extraction assistant. Analyze the conversation turn and extract key facts, "
-    "preferences, background details, constraints, or goals about the user that are worth remembering "
-    "long-term across chats. Ignore generic conversation, greetings, and ephemeral requests. "
+    "You are a memory extraction assistant. Extract key facts, preferences, background details, "
+    "constraints, or goals about the user that are worth remembering long-term across chats, but "
+    "only when the user explicitly states or confirms them. Do not infer facts from questions, "
+    "requests, hypotheticals, or quoted text. Ignore generic conversation, greetings, and ephemeral "
+    "requests. "
     "For each extracted memory, provide a concise declarative sentence (e.g. 'User is a backend engineer') "
     "and an importance score from 1 to 10 (1=minor detail, 10=critical identity/constraint/allergy). "
     "Respond ONLY with a valid JSON array of objects with 'text' and 'importance' keys: "
@@ -426,8 +428,6 @@ class MemoryExtractor:
             return []
 
         prompt = f"User message:\n{user_text}"
-        if assistant_text:
-            prompt += f"\n\nAssistant reply:\n{assistant_text.strip()}"
 
         raw_output = None
         # Try local model first, then API if configured

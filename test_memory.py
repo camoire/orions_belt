@@ -220,6 +220,28 @@ class TestMemoryExtractor(unittest.TestCase):
         self.assertEqual(memories[0]["text"], "User works at OpenAI")
         self.assertEqual(memories[0]["importance"], 8.0)
 
+    def test_extraction_ignores_assistant_reply_and_follow_up_questions(self):
+        mock_model = MagicMock()
+        mock_model.create_chat_completion.return_value = {
+            "choices": [{"message": {"content": "[]"}}]
+        }
+        extractor = MemoryExtractor(model=mock_model)
+
+        memories = extractor.extract(
+            "What's my name?",
+            assistant_text=(
+                "Your name is Cameron.\n"
+                "Follow up: What are the names of my dogs?\n"
+                "What kind of stories do you enjoy hearing about my dogs?"
+            ),
+        )
+
+        self.assertEqual(memories, [])
+        messages = mock_model.create_chat_completion.call_args.kwargs["messages"]
+        self.assertEqual(messages[1]["content"], "User message:\nWhat's my name?")
+        self.assertNotIn("Cameron", messages[1]["content"])
+        self.assertIn("only when the user explicitly states or confirms them", messages[0]["content"])
+
     def test_extract_and_store(self):
         mock_client = MagicMock()
         mock_coll = MockCollection()
