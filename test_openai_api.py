@@ -146,13 +146,72 @@ class TestOpenAIAPI(unittest.TestCase):
 
         async def check_responsiveness():
             completion = asyncio.create_task(app_module.openai_chat_completions(request))
-            await asyncio.sleep(0.01)
-            is_responsive = started.is_set() and not completion.done()
-            release.set()
+            try:
+                worker_started = await asyncio.wait_for(
+                    asyncio.to_thread(started.wait), timeout=1
+                )
+                self.assertTrue(worker_started)
+                self.assertFalse(completion.done())
+            finally:
+                release.set()
             await completion
-            return is_responsive
 
-        self.assertFalse(asyncio.run(check_responsiveness()))
+        asyncio.run(check_responsiveness())
+
+    def test_legacy_generation_serializes_turns_per_session(self):
+        session_id = "serialized-turn-test"
+        app_module.conversations.clear(session_id)
+        self.addCleanup(app_module.conversations.clear, session_id)
+        started = threading.Event()
+        release = threading.Event()
+        snapshots = []
+
+        def generate_from_messages(messages):
+            snapshots.append(list(messages))
+            if len(snapshots) == 1:
+                started.set()
+                release.wait(timeout=2)
+                return "first reply"
+            return "second reply"
+
+        async def run_concurrent_turns():
+            with patch.object(
+                app_module, "generate_from_messages", side_effect=generate_from_messages
+            ):
+                first = asyncio.create_task(
+                    app_module.generate("first", session_id=session_id)
+                )
+                second = asyncio.create_task(
+                    app_module.generate("second", session_id=session_id)
+                )
+                try:
+                    worker_started = await asyncio.wait_for(
+                        asyncio.to_thread(started.wait), timeout=1
+                    )
+                    self.assertTrue(worker_started)
+                    self.assertEqual(len(snapshots), 1)
+                finally:
+                    release.set()
+                    await asyncio.gather(first, second)
+
+        asyncio.run(run_concurrent_turns())
+
+        self.assertEqual(
+            [message["content"] for message in snapshots[0] if message["role"] != "system"],
+            ["User says:\nfirst"],
+        )
+        self.assertEqual(
+            [
+                (message["role"], message["content"])
+                for message in snapshots[1]
+                if message["role"] != "system"
+            ],
+            [
+                ("user", "User says:\nfirst"),
+                ("assistant", "first reply"),
+                ("user", "User says:\nsecond"),
+            ],
+        )
 
     def test_chat_completion_rejects_unknown_model_and_image_content(self):
         wrong_model = app_module.ChatCompletionRequest(

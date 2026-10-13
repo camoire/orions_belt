@@ -1,6 +1,7 @@
 # -----------------------------
 # Standard Library Imports
 # -----------------------------
+import asyncio
 import io
 import gc
 import hmac
@@ -9,6 +10,7 @@ import os
 import threading
 import time
 import uuid
+import weakref
 from threading import Lock
 
 # -----------------------------
@@ -132,6 +134,15 @@ whisper_model = whisper.load_model("base")
 generation_lock = Lock()  # prevent concurrent generate() on same model instance
 image_generation_lock = Lock()
 voice_transcription_lock = Lock()
+session_locks = weakref.WeakValueDictionary()
+
+
+def get_session_lock(session_id: str) -> asyncio.Lock:
+    lock = session_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        session_locks[session_id] = lock
+    return lock
 
 memory = MemoryStore()
 memory_extractor = MemoryExtractor(model=model, generation_lock=generation_lock)
@@ -650,21 +661,22 @@ async def openai_completions(request: CompletionRequest):
 # -----------------------------
 @app.post("/generate")
 async def generate(user_text: str = Body(...), session_id: str = Body("default")):
-    session_messages = conversations.get(session_id)
+    async with get_session_lock(session_id):
+        session_messages = conversations.get(session_id)
 
-    memory_items = memory.retrieve(user_text, top_k=5)
-    build_messages(
-        session_messages=session_messages,
-        user_text=user_text,
-        image_description=None,
-        voice_text=None,
-        memory_items=memory_items
-    )
+        memory_items = memory.retrieve(user_text, top_k=5)
+        build_messages(
+            session_messages=session_messages,
+            user_text=user_text,
+            image_description=None,
+            voice_text=None,
+            memory_items=memory_items
+        )
 
-    output = await run_in_threadpool(generate_from_messages, list(session_messages))
+        output = await run_in_threadpool(generate_from_messages, list(session_messages))
 
-    # Append assistant reply for the next turn (core multi-turn step) [1](https://qwen.readthedocs.io/en/v2.0/inference/chat.html)
-    session_messages.append({"role": "assistant", "content": output})
+        # Append assistant reply for the next turn (core multi-turn step) [1](https://qwen.readthedocs.io/en/v2.0/inference/chat.html)
+        session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(user_text, None, None, output)
     threading.Thread(
@@ -679,8 +691,6 @@ async def generate(user_text: str = Body(...), session_id: str = Body("default")
 # -----------------------------
 @app.post("/generate-image")
 async def generate_from_image(file: UploadFile = File(...), session_id: str = "default"):
-    session_messages = conversations.get(session_id)
-
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
@@ -692,17 +702,19 @@ async def generate_from_image(file: UploadFile = File(...), session_id: str = "d
 
     image_description = await run_in_threadpool(caption_image)
 
-    memory_items = memory.retrieve(image_description, top_k=5) if image_description else []
-    build_messages(
-        session_messages=session_messages,
-        user_text=None,
-        image_description=image_description,
-        voice_text=None,
-        memory_items=memory_items
-    )
+    async with get_session_lock(session_id):
+        session_messages = conversations.get(session_id)
+        memory_items = memory.retrieve(image_description, top_k=5) if image_description else []
+        build_messages(
+            session_messages=session_messages,
+            user_text=None,
+            image_description=image_description,
+            voice_text=None,
+            memory_items=memory_items
+        )
 
-    output = await run_in_threadpool(generate_from_messages, list(session_messages))
-    session_messages.append({"role": "assistant", "content": output})
+        output = await run_in_threadpool(generate_from_messages, list(session_messages))
+        session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(None, image_description, None, output)
     return {"session_id": session_id, "image_description": image_description, "generated_text": output}
@@ -712,8 +724,6 @@ async def generate_from_image(file: UploadFile = File(...), session_id: str = "d
 # -----------------------------
 @app.post("/generate-voice")
 async def generate_from_voice(file: UploadFile = File(...), session_id: str = "default"):
-    session_messages = conversations.get(session_id)
-
     audio_bytes = await file.read()
     audio_path = f"temp_audio_{uuid.uuid4().hex}.wav"
 
@@ -729,17 +739,19 @@ async def generate_from_voice(file: UploadFile = File(...), session_id: str = "d
 
     voice_text = await run_in_threadpool(transcribe_audio)
 
-    memory_items = memory.retrieve(voice_text, top_k=5) if voice_text else []
-    build_messages(
-        session_messages=session_messages,
-        user_text=None,
-        image_description=None,
-        voice_text=voice_text,
-        memory_items=memory_items
-    )
+    async with get_session_lock(session_id):
+        session_messages = conversations.get(session_id)
+        memory_items = memory.retrieve(voice_text, top_k=5) if voice_text else []
+        build_messages(
+            session_messages=session_messages,
+            user_text=None,
+            image_description=None,
+            voice_text=voice_text,
+            memory_items=memory_items
+        )
 
-    output = await run_in_threadpool(generate_from_messages, list(session_messages))
-    session_messages.append({"role": "assistant", "content": output})
+        output = await run_in_threadpool(generate_from_messages, list(session_messages))
+        session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(None, None, voice_text, output)
     threading.Thread(
