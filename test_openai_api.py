@@ -319,13 +319,121 @@ class TestOpenAIAPI(unittest.TestCase):
 
         response = asyncio.run(app_module.openai_chat_completions(request))
         async def collect_chunks():
-            return [chunk async for chunk in response.body_iterator]
+            iterator = response.body_iterator
+            first = await iterator.__anext__()
+            first_text = first.decode() if isinstance(first, bytes) else first
+            self.assertIn('"delta": {"role": "assistant"}', first_text)
+            self.model.create_chat_completion.assert_not_called()
+            return [first, *[chunk async for chunk in iterator]]
 
         chunks = asyncio.run(collect_chunks())
-        payload = b"".join(chunk if isinstance(chunk, bytes) else chunk.encode() for chunk in chunks)
-        self.assertIn(b'"object": "chat.completion.chunk"', payload)
-        self.assertIn(b'"content": "hello"', payload)
-        self.assertIn(b"data: [DONE]", payload)
+        payload = "".join(chunk.decode() if isinstance(chunk, bytes) else chunk for chunk in chunks)
+        self.assertIn('"object": "chat.completion.chunk"', payload)
+        self.assertIn('"content": "hello"', payload)
+        self.assertIn("data: [DONE]", payload)
+
+    def test_generate_stream_sends_status_before_incremental_text(self):
+        session_id = "generate-stream-test"
+        session_messages = []
+        self.model.create_chat_completion.return_value = iter([
+            {"choices": [{"delta": {"content": " hello"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": " world "}, "finish_reason": "stop"}]},
+        ])
+
+        with patch.object(app_module.conversations, "get", return_value=session_messages):
+            response = asyncio.run(app_module.generate("hi", session_id, stream=True))
+
+            async def collect_stream():
+                iterator = response.body_iterator
+                status = await iterator.__anext__()
+                status_text = status.decode() if isinstance(status, bytes) else status
+                self.assertIn("event: status", status_text)
+                self.assertIn('"status": "generating"', status_text)
+                self.model.create_chat_completion.assert_not_called()
+                return [status, *[chunk async for chunk in iterator]]
+
+            chunks = asyncio.run(collect_stream())
+        payload = "".join(chunk.decode() if isinstance(chunk, bytes) else chunk for chunk in chunks)
+
+        self.assertEqual(response.media_type, "text/event-stream")
+        self.assertIn("event: delta", payload)
+        self.assertIn('"generated_text": " hello"', payload)
+        self.assertIn('"generated_text": " world "', payload)
+        self.assertIn("event: done", payload)
+        self.assertTrue(self.model.create_chat_completion.call_args.kwargs["stream"])
+        self.assertEqual(session_messages[-1]["content"], " hello world ")
+        self.assertIn('"generated_text": " hello world "', payload)
+
+    def test_generate_stream_does_not_commit_messages_after_inference_error(self):
+        session_id = "generate-stream-error-test"
+        session_messages = [{"role": "system", "content": "existing"}]
+
+        def build_pending_messages(session_messages, **_):
+            session_messages.append({"role": "user", "content": "hi"})
+
+        def failing_stream(**_):
+            def chunks():
+                yield {"choices": [{"delta": {"content": "partial"}}]}
+                raise RuntimeError("inference failed")
+
+            return chunks()
+
+        self.model.create_chat_completion.side_effect = failing_stream
+
+        with (
+            patch.object(app_module.conversations, "get", return_value=session_messages),
+            patch.object(app_module, "build_messages", side_effect=build_pending_messages),
+        ):
+            response = asyncio.run(app_module.generate("hi", session_id, stream=True))
+
+            async def collect_stream():
+                return [chunk async for chunk in response.body_iterator]
+
+            with self.assertRaisesRegex(RuntimeError, "inference failed"):
+                asyncio.run(collect_stream())
+
+        self.assertEqual(session_messages, [{"role": "system", "content": "existing"}])
+
+    def test_generate_stream_does_not_commit_messages_when_client_disconnects(self):
+        session_id = "generate-stream-disconnect-test"
+        session_messages = [{"role": "system", "content": "existing"}]
+        self.model.create_chat_completion.return_value = iter([
+            {"choices": [{"delta": {"content": "partial"}}]},
+        ])
+
+        def build_pending_messages(session_messages, **_):
+            session_messages.append({"role": "user", "content": "hi"})
+
+        with (
+            patch.object(app_module.conversations, "get", return_value=session_messages),
+            patch.object(app_module, "build_messages", side_effect=build_pending_messages),
+        ):
+            response = asyncio.run(app_module.generate("hi", session_id, stream=True))
+
+            async def receive_partial_then_disconnect():
+                iterator = response.body_iterator
+                await iterator.__anext__()
+                partial = await iterator.__anext__()
+                await iterator.aclose()
+                return partial
+
+            asyncio.run(receive_partial_then_disconnect())
+
+        self.assertEqual(session_messages, [{"role": "system", "content": "existing"}])
+
+    def test_generate_keeps_non_streaming_json_response_by_default(self):
+        session_id = "generate-json-test"
+        session_messages = []
+        self.model.create_chat_completion.return_value = {
+            "choices": [{"message": {"content": "hello"}}],
+        }
+
+        with patch.object(app_module.conversations, "get", return_value=session_messages):
+            response = asyncio.run(app_module.generate("hi", session_id, stream=False))
+
+        self.assertEqual(response, {"session_id": session_id, "generated_text": "hello"})
+        self.assertEqual(session_messages[-1]["content"], "hello")
+        self.assertNotIn("stream", self.model.create_chat_completion.call_args.kwargs)
 
     def test_chat_completion_stream_repeats_choices_with_distinct_indexes(self):
         self.model.create_chat_completion.side_effect = [
