@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import sys
+import time
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -124,6 +125,24 @@ class TestOpenAIAPI(unittest.TestCase):
         self.assertEqual(kwargs["temperature"], 0.25)
         self.assertEqual(kwargs["tools"], request.tools)
         self.assertEqual(kwargs["seed"], 123)
+
+    def test_chat_completion_does_not_block_the_event_loop(self):
+        self.model.create_chat_completion.side_effect = lambda **_: (
+            time.sleep(0.05) or {"choices": [{"message": {"content": "hello"}}], "usage": {}}
+        )
+        request = app_module.ChatCompletionRequest(
+            model=app_module.OPENAI_MODEL_ID,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+        async def check_responsiveness():
+            completion = asyncio.create_task(app_module.openai_chat_completions(request))
+            await asyncio.sleep(0.01)
+            is_responsive = not completion.done()
+            await completion
+            return is_responsive
+
+        self.assertFalse(asyncio.run(check_responsiveness()))
 
     def test_chat_completion_rejects_unknown_model_and_image_content(self):
         wrong_model = app_module.ChatCompletionRequest(
