@@ -496,6 +496,8 @@ async def openai_completions(request: CompletionRequest):
         prompts = raw_prompt
     else:
         raise HTTPException(status_code=400, detail="prompt must contain at least one prompt.")
+    if request.best_of is not None and request.best_of < request.n:
+        raise HTTPException(status_code=400, detail="best_of must be greater than or equal to n.")
     if request.stream and request.best_of not in (None, 1):
         raise HTTPException(status_code=400, detail="Streaming does not support best_of greater than 1.")
     completion_id = f"cmpl-{uuid.uuid4().hex}"
@@ -517,6 +519,7 @@ async def openai_completions(request: CompletionRequest):
     choices = []
     prompt_tokens = 0
     completion_tokens = 0
+    output_count = 0
     with generation_lock:
         for prompt_index, prompt in enumerate(prompts):
             result = model.create_completion(
@@ -526,6 +529,7 @@ async def openai_completions(request: CompletionRequest):
             prompt_tokens += (result.get("usage") or {}).get("prompt_tokens", 0)
             completion_tokens += (result.get("usage") or {}).get("completion_tokens", 0)
             for choice_index, choice in enumerate(result.get("choices", [])):
+                output_count += 1
                 text = choice.get("text", "")
                 choices.append({
                     "text": text,
@@ -534,6 +538,8 @@ async def openai_completions(request: CompletionRequest):
                     "finish_reason": choice.get("finish_reason") or "stop",
                 })
                 log_interaction(str(prompt), None, None, text)
+    if not output_count:
+        raise HTTPException(status_code=502, detail="The model returned no completion choices.")
     return {
         "id": completion_id,
         "object": "text_completion",

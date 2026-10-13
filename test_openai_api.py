@@ -237,6 +237,22 @@ class TestOpenAIAPI(unittest.TestCase):
         asyncio.run(app_module.openai_completions(token_prompt))
         self.assertEqual(self.model.create_completion.call_args.kwargs["prompt"], [12, 15, 22])
 
+    def test_legacy_completion_rejects_unknown_model_and_invalid_best_of(self):
+        unknown = app_module.CompletionRequest(model="unknown", prompt="hello")
+        with self.assertRaises(HTTPException) as error:
+            asyncio.run(app_module.openai_completions(unknown))
+        self.assertEqual(error.exception.status_code, 404)
+
+        invalid_best_of = app_module.CompletionRequest(
+            model=app_module.OPENAI_MODEL_ID,
+            prompt="hello",
+            n=2,
+            best_of=1,
+        )
+        with self.assertRaises(HTTPException) as error:
+            asyncio.run(app_module.openai_completions(invalid_best_of))
+        self.assertEqual(error.exception.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()
