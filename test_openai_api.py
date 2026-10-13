@@ -56,9 +56,9 @@ class TestOpenAIAPI(unittest.TestCase):
         app_module.model = self.model
         app_module.memory.retrieve.reset_mock()
         app_module.memory.retrieve.return_value = []
-        self.thread_patcher = patch.object(app_module.threading, "Thread")
-        self.thread_patcher.start()
-        self.addCleanup(self.thread_patcher.stop)
+        self.extraction_patcher = patch.object(app_module, "extract_memories_background")
+        self.extraction_patcher.start()
+        self.addCleanup(self.extraction_patcher.stop)
 
     def test_openai_routes_are_registered(self):
         routes = {
@@ -165,23 +165,26 @@ class TestOpenAIAPI(unittest.TestCase):
         )
 
         response = asyncio.run(app_module.openai_chat_completions(request))
-        chunks = list(response.body_iterator)
+        async def collect_chunks():
+            return [chunk async for chunk in response.body_iterator]
+
+        chunks = asyncio.run(collect_chunks())
         payload = b"".join(chunk if isinstance(chunk, bytes) else chunk.encode() for chunk in chunks)
         self.assertIn(b'"object": "chat.completion.chunk"', payload)
         self.assertIn(b'"content": "hello"', payload)
         self.assertIn(b"data: [DONE]", payload)
 
     def test_legacy_completion_returns_text_shape_and_usage(self):
-        self.model.create_chat_completion.return_value = {
+        self.model.create_completion.return_value = {
             "choices": [
-                {"message": {"content": " world"}, "finish_reason": "stop"},
+                {"text": "hello world", "finish_reason": "stop"},
             ],
             "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
         }
         request = app_module.CompletionRequest(
             model=app_module.OPENAI_MODEL_ID,
             prompt="hello",
-            echo=True,
+            echo=False,
             max_tokens=8,
         )
 
@@ -190,12 +193,14 @@ class TestOpenAIAPI(unittest.TestCase):
         self.assertEqual(response["object"], "text_completion")
         self.assertEqual(response["choices"][0]["text"], "hello world")
         self.assertEqual(response["usage"]["total_tokens"], 3)
-        self.assertEqual(self.model.create_chat_completion.call_args.kwargs["max_tokens"], 8)
+        kwargs = self.model.create_completion.call_args.kwargs
+        self.assertEqual(kwargs["max_tokens"], 8)
+        self.assertFalse(kwargs["echo"])
 
     def test_legacy_completion_handles_multiple_prompts(self):
-        self.model.create_chat_completion.side_effect = [
-            {"choices": [{"message": {"content": "first"}}], "usage": {}},
-            {"choices": [{"message": {"content": "second"}}], "usage": {}},
+        self.model.create_completion.side_effect = [
+            {"choices": [{"text": "first"}], "usage": {}},
+            {"choices": [{"text": "second"}], "usage": {}},
         ]
         request = app_module.CompletionRequest(
             model=app_module.OPENAI_MODEL_ID, prompt=["one", "two"]
@@ -204,11 +209,15 @@ class TestOpenAIAPI(unittest.TestCase):
         response = asyncio.run(app_module.openai_completions(request))
 
         self.assertEqual([choice["text"] for choice in response["choices"]], ["first", "second"])
-        self.assertEqual([call.kwargs["messages"][0]["content"] for call in self.model.create_chat_completion.call_args_list], ["one", "two"])
+        self.assertEqual(
+            [call.kwargs["prompt"] for call in self.model.create_completion.call_args_list],
+            ["one", "two"],
+        )
 
-    def test_legacy_completion_stream_and_unsupported_options(self):
-        self.model.create_chat_completion.return_value = iter([
-            {"choices": [{"delta": {"content": "token"}}]},
+    def test_legacy_completion_stream_and_token_prompts(self):
+        self.model.create_completion.return_value = iter([
+            {"choices": [{"text": "token", "index": 0, "finish_reason": None}]},
+            {"choices": [{"text": "", "index": 0, "finish_reason": "stop"}]},
         ])
         request = app_module.CompletionRequest(
             model=app_module.OPENAI_MODEL_ID, prompt="hello", stream=True
@@ -218,12 +227,15 @@ class TestOpenAIAPI(unittest.TestCase):
         self.assertIn('"text": "token"', payload)
         self.assertIn("data: [DONE]", payload)
 
-        unsupported = app_module.CompletionRequest(
-            model=app_module.OPENAI_MODEL_ID, prompt="hello", best_of=2
+        token_prompt = app_module.CompletionRequest(
+            model=app_module.OPENAI_MODEL_ID, prompt=[12, 15, 22]
         )
-        with self.assertRaises(HTTPException) as error:
-            asyncio.run(app_module.openai_completions(unsupported))
-        self.assertEqual(error.exception.status_code, 400)
+        self.model.create_completion.return_value = {
+            "choices": [{"text": "decoded"}],
+            "usage": {},
+        }
+        asyncio.run(app_module.openai_completions(token_prompt))
+        self.assertEqual(self.model.create_completion.call_args.kwargs["prompt"], [12, 15, 22])
 
 
 if __name__ == "__main__":

@@ -200,8 +200,9 @@ The OpenAI-compatible endpoints are:
 
 Use the model ID returned by `/v1/models`. Chat message content accepts text strings
 or text-only content parts; multimodal image and audio inputs remain available through
-the dedicated endpoints below. Legacy completion suffixes, log probabilities, and
-`best_of` sampling above 1 are not supported.
+the dedicated endpoints below. Legacy completions accept string or token-ID prompts
+and support the standard sampling, echo, suffix, log-probability, `n`, and `best_of`
+options exposed by llama.cpp.
 
 ### **🧠 Memory System & Endpoints**
 

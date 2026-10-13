@@ -173,7 +173,11 @@ class ChatCompletionRequest(BaseModel):
 def prepare_openai_messages(messages: list[OpenAIMessage]) -> tuple[list[dict], str]:
     prompt_messages = []
     for message in messages:
-        item = message.dict(exclude_none=True)
+        item = (
+            message.model_dump(exclude_none=True)
+            if hasattr(message, "model_dump")
+            else message.dict(exclude_none=True)
+        )
         content = item.get("content")
         if isinstance(content, list):
             text_parts = []
@@ -226,7 +230,7 @@ def chat_completion_options(request: ChatCompletionRequest) -> dict[str, Any]:
     for field in (
         "frequency_penalty", "logit_bias", "logprobs", "top_logprobs",
         "n", "presence_penalty", "seed", "response_format", "tools",
-        "tool_choice", "parallel_tool_calls", "functions", "function_call",
+        "tool_choice", "functions", "function_call",
     ):
         value = getattr(request, field)
         if value is not None:
@@ -244,59 +248,70 @@ def openai_stream(
     model_name: str,
     request: ChatCompletionRequest,
 ) -> Iterator[str]:
-    output_parts = []
-    finish_reason = "stop"
+    output_parts: dict[int, list[str]] = {}
+    finish_reasons: dict[int, str] = {}
     with generation_lock:
         if model is None:
             raise RuntimeError("Qwen GGUF model is unavailable.")
         chunks = model.create_chat_completion(
             messages=messages, stream=True, **chat_completion_options(request)
         )
-        role_chunk = {
+        for choice_index in range(request.n or 1):
+            role_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{
+                    "index": choice_index,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": None,
+                }],
+            }
+            yield f"data: {json.dumps(role_chunk)}\n\n"
+        for chunk in chunks:
+            for choice in chunk["choices"]:
+                choice_index = choice.get("index", 0)
+                delta = choice.get("delta") or {}
+                if delta.get("role") == "assistant":
+                    delta = {key: value for key, value in delta.items() if key != "role"}
+                if delta:
+                    content = delta.get("content")
+                    if content:
+                        output_parts.setdefault(choice_index, []).append(content)
+                    response_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_name,
+                        "choices": [
+                            {"index": choice_index, "delta": delta, "finish_reason": None}
+                        ],
+                    }
+                    yield f"data: {json.dumps(response_chunk)}\n\n"
+                if choice.get("finish_reason"):
+                    finish_reasons[choice_index] = choice["finish_reason"]
+
+    for choice_index in range(request.n or 1):
+        output = "".join(output_parts.get(choice_index, []))
+        log_interaction(user_text, None, None, output)
+        threading.Thread(
+            target=extract_memories_background,
+            args=(user_text, output),
+            daemon=True,
+        ).start()
+        finish_chunk = {
             "id": completion_id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": model_name,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            "choices": [{
+                "index": choice_index,
+                "delta": {},
+                "finish_reason": finish_reasons.get(choice_index, "stop"),
+            }],
         }
-        yield f"data: {json.dumps(role_chunk)}\n\n"
-        for chunk in chunks:
-            choice = chunk["choices"][0]
-            delta = choice.get("delta") or {}
-            if delta.get("role") == "assistant":
-                delta = {key: value for key, value in delta.items() if key != "role"}
-            if delta:
-                content = delta.get("content")
-                if content:
-                    output_parts.append(content)
-                response_chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [
-                        {"index": choice.get("index", 0), "delta": delta, "finish_reason": None}
-                    ],
-                }
-                yield f"data: {json.dumps(response_chunk)}\n\n"
-            if choice.get("finish_reason"):
-                finish_reason = choice["finish_reason"]
-
-    output = "".join(output_parts)
-    log_interaction(user_text, None, None, output)
-    threading.Thread(
-        target=extract_memories_background,
-        args=(user_text, output),
-        daemon=True,
-    ).start()
-    finish_chunk = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model_name,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-    }
-    yield f"data: {json.dumps(finish_chunk)}\n\n"
+        yield f"data: {json.dumps(finish_chunk)}\n\n"
     yield "data: [DONE]\n\n"
 
 
@@ -395,7 +410,7 @@ async def openai_chat_completions(request: ChatCompletionRequest):
 
 class CompletionRequest(BaseModel):
     model: str = Field(..., min_length=1)
-    prompt: str | list[str] = Field(..., min_length=1)
+    prompt: str | list[str] | list[int] | list[list[int]] = Field(..., min_length=1)
     best_of: Optional[int] = Field(default=None, ge=1, le=128)
     echo: bool = False
     frequency_penalty: Optional[float] = Field(default=None, ge=-2, le=2)
@@ -413,41 +428,56 @@ class CompletionRequest(BaseModel):
     user: Optional[str] = None
 
 
-def text_completion_options(request: CompletionRequest, *, stream: bool = False) -> dict[str, Any]:
+def text_completion_options(request: CompletionRequest) -> dict[str, Any]:
     options: dict[str, Any] = {
         "max_tokens": request.max_tokens,
         "temperature": request.temperature if request.temperature is not None else 1,
         "top_p": request.top_p if request.top_p is not None else 1,
+        "n": request.n,
+        "echo": request.echo,
     }
-    for field in ("frequency_penalty", "presence_penalty", "logit_bias", "seed"):
+    for field in (
+        "frequency_penalty", "presence_penalty", "logit_bias", "seed",
+        "best_of", "logprobs", "suffix",
+    ):
         value = getattr(request, field)
         if value is not None:
             options[field] = value
     if request.stop is not None:
         options["stop"] = request.stop
-    if not stream:
-        options["n"] = request.n
     return options
 
 
 def completion_stream(
-    request: CompletionRequest, prompts: list[str], completion_id: str, created: int
+    request: CompletionRequest,
+    prompts: list[str | list[int]],
+    completion_id: str,
+    created: int,
 ) -> Iterator[str]:
     with generation_lock:
         if model is None:
             raise RuntimeError("Qwen GGUF model is unavailable.")
         for prompt_index, prompt in enumerate(prompts):
-            chunks = model.create_chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                **text_completion_options(request, stream=True),
+            chunks = model.create_completion(
+                prompt=prompt,
+                **text_completion_options(request),
                 stream=True,
             )
             for chunk in chunks:
-                choice = chunk["choices"][0]
-                content = (choice.get("delta") or {}).get("content", "")
-                if content:
-                    yield f"data: {json.dumps({'id': completion_id, 'object': 'text_completion', 'created': created, 'model': OPENAI_MODEL_ID, 'choices': [{'text': content, 'index': prompt_index, 'logprobs': None, 'finish_reason': None}]})}\n\n"
-            yield f"data: {json.dumps({'id': completion_id, 'object': 'text_completion', 'created': created, 'model': OPENAI_MODEL_ID, 'choices': [{'text': '', 'index': prompt_index, 'logprobs': None, 'finish_reason': 'stop'}]})}\n\n"
+                for choice in chunk["choices"]:
+                    payload = {
+                        "id": completion_id,
+                        "object": "text_completion",
+                        "created": created,
+                        "model": OPENAI_MODEL_ID,
+                        "choices": [{
+                            "text": choice.get("text", ""),
+                            "index": prompt_index * request.n + choice.get("index", 0),
+                            "logprobs": choice.get("logprobs"),
+                            "finish_reason": choice.get("finish_reason"),
+                        }],
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
     yield "data: [DONE]\n\n"
 
 
@@ -455,15 +485,19 @@ def completion_stream(
 async def openai_completions(request: CompletionRequest):
     if request.model != OPENAI_MODEL_ID:
         openai_model_not_found(request.model)
-    if request.best_of not in (None, 1):
-        raise HTTPException(status_code=400, detail="best_of values greater than 1 are not supported.")
-    if request.logprobs is not None:
-        raise HTTPException(status_code=400, detail="Completion log probabilities are not supported.")
-    if request.suffix is not None:
-        raise HTTPException(status_code=400, detail="Completion suffixes are not supported.")
-    prompts = [request.prompt] if isinstance(request.prompt, str) else request.prompt
-    if not prompts or any(not isinstance(prompt, str) for prompt in prompts):
-        raise HTTPException(status_code=400, detail="prompt must contain at least one text prompt.")
+    raw_prompt = request.prompt
+    if isinstance(raw_prompt, str):
+        prompts: list[str | list[int]] = [raw_prompt]
+    elif raw_prompt and isinstance(raw_prompt[0], str):
+        prompts = raw_prompt
+    elif raw_prompt and isinstance(raw_prompt[0], int):
+        prompts = [raw_prompt]
+    elif raw_prompt and isinstance(raw_prompt[0], list):
+        prompts = raw_prompt
+    else:
+        raise HTTPException(status_code=400, detail="prompt must contain at least one prompt.")
+    if request.stream and request.best_of not in (None, 1):
+        raise HTTPException(status_code=400, detail="Streaming does not support best_of greater than 1.")
     completion_id = f"cmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     if model is None:
@@ -472,8 +506,8 @@ async def openai_completions(request: CompletionRequest):
             detail="Qwen GGUF model is unavailable; reload the model and try again.",
         )
     if request.stream:
-        if request.n != 1 or request.best_of not in (None, 1):
-            raise HTTPException(status_code=400, detail="Streaming requires n=1 and best_of=1.")
+        if request.best_of not in (None, 1):
+            raise HTTPException(status_code=400, detail="Streaming does not support best_of greater than 1.")
         return StreamingResponse(
             completion_stream(request, prompts, completion_id, created),
             media_type="text/event-stream",
@@ -485,23 +519,21 @@ async def openai_completions(request: CompletionRequest):
     completion_tokens = 0
     with generation_lock:
         for prompt_index, prompt in enumerate(prompts):
-            result = model.create_chat_completion(
-                messages=[{"role": "user", "content": prompt}],
+            result = model.create_completion(
+                prompt=prompt,
                 **text_completion_options(request),
             )
             prompt_tokens += (result.get("usage") or {}).get("prompt_tokens", 0)
             completion_tokens += (result.get("usage") or {}).get("completion_tokens", 0)
             for choice_index, choice in enumerate(result.get("choices", [])):
-                text = choice.get("message", {}).get("content") or ""
-                if request.echo:
-                    text = prompt + text
+                text = choice.get("text", "")
                 choices.append({
                     "text": text,
                     "index": prompt_index * request.n + choice_index,
-                    "logprobs": None,
+                    "logprobs": choice.get("logprobs"),
                     "finish_reason": choice.get("finish_reason") or "stop",
                 })
-                log_interaction(prompt, None, None, text)
+                log_interaction(str(prompt), None, None, text)
     return {
         "id": completion_id,
         "object": "text_completion",
