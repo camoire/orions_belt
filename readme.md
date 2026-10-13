@@ -190,10 +190,23 @@ http://localhost:8000/docs
 
 Configure a GUI such as Open WebUI with the API base URL `http://localhost:8000/v1`
 and the model name `orions-belt` (or the value of `OPENAI_MODEL_ID`). An API key
-is not required by this local server; if the GUI requires one, enter a placeholder.
-The server supports `GET /v1/models` and `POST /v1/chat/completions`, including
-streaming chat responses. Chat messages must contain text; image and audio input
-remain available through the dedicated endpoints below.
+is not required by default; set `OPENAI_API_KEY` to require a matching bearer token
+for `/v1` routes when exposing the server.
+The OpenAI-compatible endpoints are:
+
+- `GET /v1/models` and `GET /v1/models/{model_id}` to list or retrieve the configured model.
+- `POST /v1/chat/completions` for text chat, including streaming, tool/function fields,
+  JSON response formats, token limits, sampling, penalties, `n` choices, and usage metadata.
+- `POST /v1/completions` for legacy text completions, including streaming and multiple prompts.
+
+Use the model ID returned by `/v1/models`. Chat message content accepts text strings
+or text-only content parts; multimodal image and audio inputs remain available through
+the dedicated endpoints below. Legacy completions accept string or token-ID prompts
+and support sampling, echo, suffix, log probabilities, and `n` choices. Choices are
+generated separately because the pinned backend does not accept `n`; `best_of` values
+greater than 1, `parallel_tool_calls`, and `stream_options` are rejected as unsupported.
+Requests are limited to 16 prompts, 32,768 estimated prompt tokens, 4,096 output tokens,
+and an inference work budget of 8,000,000 prompt-token/output-token units.
 
 ### **🧠 Memory System & Endpoints**
 
