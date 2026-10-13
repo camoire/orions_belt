@@ -136,28 +136,62 @@ def generate_from_messages(messages: list[dict]) -> str:
 
 
 class OpenAIMessage(BaseModel):
-    role: Literal["system", "developer", "user", "assistant"]
-    content: str
+    role: Literal["system", "developer", "user", "assistant", "tool"]
+    content: Optional[str | list[dict[str, Any]]] = None
+    name: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[list[dict[str, Any]]] = None
+    function_call: Optional[dict[str, Any]] = None
 
 
 class ChatCompletionRequest(BaseModel):
     model: str = Field(..., min_length=1)
     messages: list[OpenAIMessage] = Field(..., min_length=1)
+    frequency_penalty: Optional[float] = Field(default=None, ge=-2, le=2)
+    logit_bias: Optional[dict[str, float]] = None
+    logprobs: Optional[bool] = None
+    top_logprobs: Optional[int] = Field(default=None, ge=0, le=20)
     temperature: Optional[float] = Field(default=None, ge=0, le=2)
     top_p: Optional[float] = Field(default=None, ge=0, le=1)
     max_tokens: Optional[int] = Field(default=None, ge=1)
     max_completion_tokens: Optional[int] = Field(default=None, ge=1)
+    n: Optional[int] = Field(default=1, ge=1, le=128)
+    presence_penalty: Optional[float] = Field(default=None, ge=-2, le=2)
     stop: Optional[str | list[str]] = None
     stream: bool = False
+    seed: Optional[int] = None
+    response_format: Optional[dict[str, Any]] = None
+    tools: Optional[list[dict[str, Any]]] = None
+    tool_choice: Optional[str | dict[str, Any]] = None
+    parallel_tool_calls: Optional[bool] = None
+    functions: Optional[list[dict[str, Any]]] = None
+    function_call: Optional[str | dict[str, Any]] = None
+    stream_options: Optional[dict[str, Any]] = None
+    user: Optional[str] = None
 
 
 def prepare_openai_messages(messages: list[OpenAIMessage]) -> tuple[list[dict], str]:
-    prompt_messages = [message.dict() for message in messages]
+    prompt_messages = []
+    for message in messages:
+        item = message.dict(exclude_none=True)
+        content = item.get("content")
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if part.get("type") in ("text", "input_text") and isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Only text message content is supported by this model.",
+                    )
+            item["content"] = "".join(text_parts)
+        prompt_messages.append(item)
     user_text = next(
         (
             message["content"]
             for message in reversed(prompt_messages)
-            if message["role"] == "user"
+            if message["role"] == "user" and isinstance(message.get("content"), str)
         ),
         ""
     )
@@ -179,6 +213,29 @@ def prepare_openai_messages(messages: list[OpenAIMessage]) -> tuple[list[dict], 
     return prompt_messages, user_text
 
 
+def openai_model_not_found(model_name: str):
+    raise HTTPException(status_code=404, detail=f"The model '{model_name}' does not exist.")
+
+
+def chat_completion_options(request: ChatCompletionRequest) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "max_tokens": request.max_completion_tokens or request.max_tokens or 256,
+        "temperature": request.temperature if request.temperature is not None else 0.7,
+        "top_p": request.top_p if request.top_p is not None else 1.0,
+    }
+    for field in (
+        "frequency_penalty", "logit_bias", "logprobs", "top_logprobs",
+        "n", "presence_penalty", "seed", "response_format", "tools",
+        "tool_choice", "parallel_tool_calls", "functions", "function_call",
+    ):
+        value = getattr(request, field)
+        if value is not None:
+            options[field] = value
+    if request.stop is not None:
+        options["stop"] = request.stop
+    return options
+
+
 def openai_stream(
     messages: list[dict],
     user_text: str,
@@ -193,12 +250,7 @@ def openai_stream(
         if model is None:
             raise RuntimeError("Qwen GGUF model is unavailable.")
         chunks = model.create_chat_completion(
-            messages=messages,
-            max_tokens=request.max_completion_tokens or request.max_tokens or 256,
-            temperature=request.temperature if request.temperature is not None else 0.7,
-            top_p=request.top_p if request.top_p is not None else 1.0,
-            stop=request.stop,
-            stream=True,
+            messages=messages, stream=True, **chat_completion_options(request)
         )
         role_chunk = {
             "id": completion_id,
@@ -211,16 +263,19 @@ def openai_stream(
         for chunk in chunks:
             choice = chunk["choices"][0]
             delta = choice.get("delta") or {}
-            content = delta.get("content")
-            if content:
-                output_parts.append(content)
+            if delta.get("role") == "assistant":
+                delta = {key: value for key, value in delta.items() if key != "role"}
+            if delta:
+                content = delta.get("content")
+                if content:
+                    output_parts.append(content)
                 response_chunk = {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model_name,
                     "choices": [
-                        {"index": 0, "delta": {"content": content}, "finish_reason": None}
+                        {"index": choice.get("index", 0), "delta": delta, "finish_reason": None}
                     ],
                 }
                 yield f"data: {json.dumps(response_chunk)}\n\n"
@@ -260,8 +315,22 @@ async def openai_list_models():
     }
 
 
+@app.get("/v1/models/{model_id}")
+async def openai_retrieve_model(model_id: str):
+    if model_id != OPENAI_MODEL_ID:
+        openai_model_not_found(model_id)
+    return {
+        "id": OPENAI_MODEL_ID,
+        "object": "model",
+        "created": 0,
+        "owned_by": "orions-belt",
+    }
+
+
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(request: ChatCompletionRequest):
+    if request.model != OPENAI_MODEL_ID:
+        openai_model_not_found(request.model)
     messages, user_text = prepare_openai_messages(request.messages)
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -288,14 +357,13 @@ async def openai_chat_completions(request: ChatCompletionRequest):
 
     with generation_lock:
         result = model.create_chat_completion(
-            messages=messages,
-            max_tokens=request.max_completion_tokens or request.max_tokens or 256,
-            temperature=request.temperature if request.temperature is not None else 0.7,
-            top_p=request.top_p if request.top_p is not None else 1.0,
-            stop=request.stop,
+            messages=messages, **chat_completion_options(request)
         )
-    choice = result["choices"][0]
-    output = (choice["message"]["content"] or "").strip()
+    output_choices = result.get("choices", [])
+    if not output_choices:
+        raise HTTPException(status_code=502, detail="The model returned no completion choices.")
+    output = (output_choices[0].get("message", {}).get("content") or "")
+    output = output.strip() if isinstance(output, str) else ""
     log_interaction(user_text, None, None, output)
     threading.Thread(
         target=extract_memories_background,
@@ -310,15 +378,140 @@ async def openai_chat_completions(request: ChatCompletionRequest):
         "model": OPENAI_MODEL_ID,
         "choices": [
             {
-                "index": 0,
-                "message": {"role": "assistant", "content": output},
+                "index": choice.get("index", index),
+                "message": choice.get("message", {"role": "assistant", "content": output}),
                 "finish_reason": choice.get("finish_reason") or "stop",
+                **({"logprobs": choice["logprobs"]} if "logprobs" in choice else {}),
             }
+            for index, choice in enumerate(output_choices)
         ],
         "usage": {
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
+        },
+    }
+
+
+class CompletionRequest(BaseModel):
+    model: str = Field(..., min_length=1)
+    prompt: str | list[str] = Field(..., min_length=1)
+    best_of: Optional[int] = Field(default=None, ge=1, le=128)
+    echo: bool = False
+    frequency_penalty: Optional[float] = Field(default=None, ge=-2, le=2)
+    logit_bias: Optional[dict[str, float]] = None
+    logprobs: Optional[int] = Field(default=None, ge=0, le=5)
+    max_tokens: int = Field(default=16, ge=0)
+    n: int = Field(default=1, ge=1, le=128)
+    presence_penalty: Optional[float] = Field(default=None, ge=-2, le=2)
+    seed: Optional[int] = None
+    stop: Optional[str | list[str]] = None
+    stream: bool = False
+    suffix: Optional[str] = None
+    temperature: Optional[float] = Field(default=1, ge=0, le=2)
+    top_p: Optional[float] = Field(default=1, ge=0, le=1)
+    user: Optional[str] = None
+
+
+def text_completion_options(request: CompletionRequest, *, stream: bool = False) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "max_tokens": request.max_tokens,
+        "temperature": request.temperature if request.temperature is not None else 1,
+        "top_p": request.top_p if request.top_p is not None else 1,
+    }
+    for field in ("frequency_penalty", "presence_penalty", "logit_bias", "seed"):
+        value = getattr(request, field)
+        if value is not None:
+            options[field] = value
+    if request.stop is not None:
+        options["stop"] = request.stop
+    if not stream:
+        options["n"] = request.n
+    return options
+
+
+def completion_stream(
+    request: CompletionRequest, prompts: list[str], completion_id: str, created: int
+) -> Iterator[str]:
+    with generation_lock:
+        if model is None:
+            raise RuntimeError("Qwen GGUF model is unavailable.")
+        for prompt_index, prompt in enumerate(prompts):
+            chunks = model.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                **text_completion_options(request, stream=True),
+                stream=True,
+            )
+            for chunk in chunks:
+                choice = chunk["choices"][0]
+                content = (choice.get("delta") or {}).get("content", "")
+                if content:
+                    yield f"data: {json.dumps({'id': completion_id, 'object': 'text_completion', 'created': created, 'model': OPENAI_MODEL_ID, 'choices': [{'text': content, 'index': prompt_index, 'logprobs': None, 'finish_reason': None}]})}\n\n"
+            yield f"data: {json.dumps({'id': completion_id, 'object': 'text_completion', 'created': created, 'model': OPENAI_MODEL_ID, 'choices': [{'text': '', 'index': prompt_index, 'logprobs': None, 'finish_reason': 'stop'}]})}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+@app.post("/v1/completions")
+async def openai_completions(request: CompletionRequest):
+    if request.model != OPENAI_MODEL_ID:
+        openai_model_not_found(request.model)
+    if request.best_of not in (None, 1):
+        raise HTTPException(status_code=400, detail="best_of values greater than 1 are not supported.")
+    if request.logprobs is not None:
+        raise HTTPException(status_code=400, detail="Completion log probabilities are not supported.")
+    if request.suffix is not None:
+        raise HTTPException(status_code=400, detail="Completion suffixes are not supported.")
+    prompts = [request.prompt] if isinstance(request.prompt, str) else request.prompt
+    if not prompts or any(not isinstance(prompt, str) for prompt in prompts):
+        raise HTTPException(status_code=400, detail="prompt must contain at least one text prompt.")
+    completion_id = f"cmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Qwen GGUF model is unavailable; reload the model and try again.",
+        )
+    if request.stream:
+        if request.n != 1 or request.best_of not in (None, 1):
+            raise HTTPException(status_code=400, detail="Streaming requires n=1 and best_of=1.")
+        return StreamingResponse(
+            completion_stream(request, prompts, completion_id, created),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    choices = []
+    prompt_tokens = 0
+    completion_tokens = 0
+    with generation_lock:
+        for prompt_index, prompt in enumerate(prompts):
+            result = model.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                **text_completion_options(request),
+            )
+            prompt_tokens += (result.get("usage") or {}).get("prompt_tokens", 0)
+            completion_tokens += (result.get("usage") or {}).get("completion_tokens", 0)
+            for choice_index, choice in enumerate(result.get("choices", [])):
+                text = choice.get("message", {}).get("content") or ""
+                if request.echo:
+                    text = prompt + text
+                choices.append({
+                    "text": text,
+                    "index": prompt_index * request.n + choice_index,
+                    "logprobs": None,
+                    "finish_reason": choice.get("finish_reason") or "stop",
+                })
+                log_interaction(prompt, None, None, text)
+    return {
+        "id": completion_id,
+        "object": "text_completion",
+        "created": created,
+        "model": OPENAI_MODEL_ID,
+        "choices": choices,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
         },
     }
 

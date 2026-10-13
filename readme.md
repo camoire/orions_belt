@@ -191,9 +191,17 @@ http://localhost:8000/docs
 Configure a GUI such as Open WebUI with the API base URL `http://localhost:8000/v1`
 and the model name `orions-belt` (or the value of `OPENAI_MODEL_ID`). An API key
 is not required by this local server; if the GUI requires one, enter a placeholder.
-The server supports `GET /v1/models` and `POST /v1/chat/completions`, including
-streaming chat responses. Chat messages must contain text; image and audio input
-remain available through the dedicated endpoints below.
+The OpenAI-compatible endpoints are:
+
+- `GET /v1/models` and `GET /v1/models/{model_id}` to list or retrieve the configured model.
+- `POST /v1/chat/completions` for text chat, including streaming, tool/function fields,
+  JSON response formats, token limits, sampling, penalties, and usage metadata.
+- `POST /v1/completions` for legacy text completions, including streaming and multiple prompts.
+
+Use the model ID returned by `/v1/models`. Chat message content accepts text strings
+or text-only content parts; multimodal image and audio inputs remain available through
+the dedicated endpoints below. Legacy completion suffixes, log probabilities, and
+`best_of` sampling above 1 are not supported.
 
 ### **🧠 Memory System & Endpoints**
 
