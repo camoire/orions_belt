@@ -230,7 +230,10 @@ class TestMemoryExtractor(unittest.TestCase):
                             '[{"text": "Pets", "importance": 7}, '
                             '{"text": "Dogs", "importance": 7}, '
                             '{"text": "Pet Care", "importance": 6}, '
-                            '{"text": "User has two dogs", "importance": 8}]'
+                            '{"text": "Things I Like", "importance": 7}, '
+                            '{"text": "User has two dogs", "importance": 8}, '
+                            '{"text": "User travels by train", "importance": 8}, '
+                            '{"text": "User avoids gluten", "importance": 9}]'
                         )
                     }
                 }
@@ -240,7 +243,14 @@ class TestMemoryExtractor(unittest.TestCase):
 
         memories = extractor.extract("I have two dogs.")
 
-        self.assertEqual(memories, [{"text": "User has two dogs", "importance": 8.0}])
+        self.assertEqual(
+            memories,
+            [
+                {"text": "User has two dogs", "importance": 8.0},
+                {"text": "User travels by train", "importance": 8.0},
+                {"text": "User avoids gluten", "importance": 9.0},
+            ],
+        )
         self.assertIn("Never extract topic labels, tags, categories", EXTRACTION_SYSTEM_PROMPT)
 
     def test_empty_llm_result_does_not_fall_back_to_heuristics(self):

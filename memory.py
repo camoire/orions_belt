@@ -306,13 +306,8 @@ EXTRACTION_SYSTEM_PROMPT = (
     '[{"text": "...", "importance": 8}]. If nothing is worth remembering, respond with [].'
 )
 
-_MEMORY_VERB_PATTERN = re.compile(
-    r"\b(?:am|is|are|was|were|be|been|being|have|has|had|do|does|did|"
-    r"can|could|will|would|should|might|must|prefer(?:s|red)?|like(?:s|d)?|"
-    r"love(?:s|d)?|hate(?:s|d)?|dislike(?:s|d)?|work(?:s|ed)?|live(?:s|d)?|"
-    r"use(?:s|d)?|know(?:s|n)?|speak(?:s|ing)?|write(?:s|ing)?|"
-    r"study|studies|own(?:s|ed)?|want(?:s|ed)?|need(?:s|ed)?|enjoy(?:s|ed)?|"
-    r"remember(?:s|ed)?|consider(?:s|ed)?)\b",
+_MEMORY_SENTENCE_PATTERN = re.compile(
+    r"^(?:user(?:'s)?|i)\s+\S+(?:\s+.*)?$",
     re.I,
 )
 
@@ -463,7 +458,7 @@ class MemoryExtractor:
                     for item in parsed:
                         if isinstance(item, dict) and "text" in item:
                             txt = str(item["text"]).strip()
-                            if txt and _MEMORY_VERB_PATTERN.search(txt):
+                            if _MEMORY_SENTENCE_PATTERN.fullmatch(txt):
                                 imp = float(item.get("importance", 5.0))
                                 imp = max(1.0, min(10.0, imp))
                                 items.append({"text": txt, "importance": imp})
