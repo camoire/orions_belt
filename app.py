@@ -698,21 +698,46 @@ async def generate_stream(user_text: str, session_id: str) -> AsyncIterator[str]
     async with get_session_lock(session_id):
         session_messages = conversations.get(session_id)
         memory_items = await run_in_threadpool(memory.retrieve, user_text, top_k=5)
+        pending_messages = [dict(message) for message in session_messages]
         build_messages(
-            session_messages=session_messages,
+            session_messages=pending_messages,
             user_text=user_text,
             image_description=None,
             voice_text=None,
             memory_items=memory_items,
         )
-        chunks = await run_in_threadpool(stream_from_messages, list(session_messages))
-        while True:
-            content = await run_in_threadpool(next_stream_content, chunks)
-            if content is None:
-                break
-            output_parts.append(content)
-            yield f"event: delta\ndata: {json.dumps({'session_id': session_id, 'generated_text': content})}\n\n"
-        output = "".join(output_parts).strip()
+
+        chunks_queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        cancelled = threading.Event()
+
+        def produce_chunks():
+            try:
+                for content in stream_from_messages(pending_messages):
+                    if cancelled.is_set():
+                        break
+                    loop.call_soon_threadsafe(chunks_queue.put_nowait, ("content", content))
+            except Exception as exc:
+                loop.call_soon_threadsafe(chunks_queue.put_nowait, ("error", exc))
+            finally:
+                loop.call_soon_threadsafe(chunks_queue.put_nowait, ("done", None))
+
+        producer = threading.Thread(target=produce_chunks, daemon=True)
+        producer.start()
+        try:
+            while True:
+                kind, value = await chunks_queue.get()
+                if kind == "done":
+                    break
+                if kind == "error":
+                    raise value
+                content = value
+                output_parts.append(content)
+                yield f"event: delta\ndata: {json.dumps({'session_id': session_id, 'generated_text': content})}\n\n"
+        finally:
+            cancelled.set()
+        output = "".join(output_parts)
+        session_messages[:] = pending_messages
         session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(user_text, None, None, output)
@@ -722,13 +747,6 @@ async def generate_stream(user_text: str, session_id: str) -> AsyncIterator[str]
         daemon=True,
     ).start()
     yield f"event: done\ndata: {json.dumps({'session_id': session_id, 'generated_text': output})}\n\n"
-
-
-def next_stream_content(chunks: Iterator[str]) -> Optional[str]:
-    try:
-        return next(chunks)
-    except StopIteration:
-        return None
 
 
 @app.post("/generate")
