@@ -1,6 +1,7 @@
 # -----------------------------
 # Standard Library Imports
 # -----------------------------
+import asyncio
 import io
 import gc
 import hmac
@@ -9,6 +10,7 @@ import os
 import threading
 import time
 import uuid
+import weakref
 from threading import Lock
 
 # -----------------------------
@@ -17,6 +19,7 @@ from threading import Lock
 import whisper
 from fastapi import FastAPI, File, HTTPException, UploadFile, Body, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from llama_cpp import Llama
 from PIL import Image
 from transformers import (
@@ -129,6 +132,17 @@ whisper_model = whisper.load_model("base")
 # Generation Lock & Memory Store
 # -----------------------------
 generation_lock = Lock()  # prevent concurrent generate() on same model instance
+image_generation_lock = Lock()
+voice_transcription_lock = Lock()
+session_locks = weakref.WeakValueDictionary()
+
+
+def get_session_lock(session_id: str) -> asyncio.Lock:
+    lock = session_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        session_locks[session_id] = lock
+    return lock
 
 memory = MemoryStore()
 memory_extractor = MemoryExtractor(model=model, generation_lock=generation_lock)
@@ -436,18 +450,22 @@ async def openai_chat_completions(request: ChatCompletionRequest):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    output_choices = []
-    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    with generation_lock:
-        for _ in range(request.n or 1):
-            result = model.create_chat_completion(
-                messages=messages, **chat_completion_options(request)
-            )
-            for choice in result.get("choices", []):
-                output_choices.append({**choice, "index": len(output_choices)})
-            result_usage = result.get("usage") or {}
-            for field in usage:
-                usage[field] += result_usage.get(field, 0)
+    def generate_choices():
+        output_choices = []
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        with generation_lock:
+            for _ in range(request.n or 1):
+                result = model.create_chat_completion(
+                    messages=messages, **chat_completion_options(request)
+                )
+                for choice in result.get("choices", []):
+                    output_choices.append({**choice, "index": len(output_choices)})
+                result_usage = result.get("usage") or {}
+                for field in usage:
+                    usage[field] += result_usage.get(field, 0)
+        return output_choices, usage
+
+    output_choices, usage = await run_in_threadpool(generate_choices)
     if not output_choices:
         raise HTTPException(status_code=502, detail="The model returned no completion choices.")
     output = (output_choices[0].get("message", {}).get("content") or "")
@@ -594,29 +612,35 @@ async def openai_completions(request: CompletionRequest):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    choices = []
-    prompt_tokens = 0
-    completion_tokens = 0
-    output_count = 0
-    with generation_lock:
-        for prompt_index, prompt in enumerate(prompts):
-            for choice_index in range(request.n):
-                result = model.create_completion(
-                    prompt=prompt,
-                    **text_completion_options(request),
-                )
-                prompt_tokens += (result.get("usage") or {}).get("prompt_tokens", 0)
-                completion_tokens += (result.get("usage") or {}).get("completion_tokens", 0)
-                for choice in result.get("choices", []):
-                    output_count += 1
-                    text = choice.get("text", "")
-                    choices.append({
-                        "text": text,
-                        "index": prompt_index * request.n + choice_index,
-                        "logprobs": choice.get("logprobs"),
-                        "finish_reason": choice.get("finish_reason") or "stop",
-                    })
-                    log_interaction(str(prompt), None, None, text)
+    def generate_completions():
+        choices = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        output_count = 0
+        with generation_lock:
+            for prompt_index, prompt in enumerate(prompts):
+                for choice_index in range(request.n):
+                    result = model.create_completion(
+                        prompt=prompt,
+                        **text_completion_options(request),
+                    )
+                    prompt_tokens += (result.get("usage") or {}).get("prompt_tokens", 0)
+                    completion_tokens += (result.get("usage") or {}).get("completion_tokens", 0)
+                    for choice in result.get("choices", []):
+                        output_count += 1
+                        text = choice.get("text", "")
+                        choices.append({
+                            "text": text,
+                            "index": prompt_index * request.n + choice_index,
+                            "logprobs": choice.get("logprobs"),
+                            "finish_reason": choice.get("finish_reason") or "stop",
+                        })
+                        log_interaction(str(prompt), None, None, text)
+        return choices, prompt_tokens, completion_tokens, output_count
+
+    choices, prompt_tokens, completion_tokens, output_count = await run_in_threadpool(
+        generate_completions
+    )
     if not output_count:
         raise HTTPException(status_code=502, detail="The model returned no completion choices.")
     return {
@@ -637,21 +661,22 @@ async def openai_completions(request: CompletionRequest):
 # -----------------------------
 @app.post("/generate")
 async def generate(user_text: str = Body(...), session_id: str = Body("default")):
-    session_messages = conversations.get(session_id)
+    async with get_session_lock(session_id):
+        session_messages = conversations.get(session_id)
 
-    memory_items = memory.retrieve(user_text, top_k=5)
-    build_messages(
-        session_messages=session_messages,
-        user_text=user_text,
-        image_description=None,
-        voice_text=None,
-        memory_items=memory_items
-    )
+        memory_items = memory.retrieve(user_text, top_k=5)
+        build_messages(
+            session_messages=session_messages,
+            user_text=user_text,
+            image_description=None,
+            voice_text=None,
+            memory_items=memory_items
+        )
 
-    output = generate_from_messages(session_messages)
+        output = await run_in_threadpool(generate_from_messages, list(session_messages))
 
-    # Append assistant reply for the next turn (core multi-turn step) [1](https://qwen.readthedocs.io/en/v2.0/inference/chat.html)
-    session_messages.append({"role": "assistant", "content": output})
+        # Append assistant reply for the next turn (core multi-turn step) [1](https://qwen.readthedocs.io/en/v2.0/inference/chat.html)
+        session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(user_text, None, None, output)
     threading.Thread(
@@ -666,26 +691,30 @@ async def generate(user_text: str = Body(...), session_id: str = Body("default")
 # -----------------------------
 @app.post("/generate-image")
 async def generate_from_image(file: UploadFile = File(...), session_id: str = "default"):
-    session_messages = conversations.get(session_id)
-
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    inputs = processor(images=image, return_tensors="pt")
-    caption_ids = blip_model.generate(**inputs, max_length=64)
-    image_description = processor.decode(caption_ids[0], skip_special_tokens=True)
+    def caption_image():
+        with image_generation_lock:
+            inputs = processor(images=image, return_tensors="pt")
+            caption_ids = blip_model.generate(**inputs, max_length=64)
+            return processor.decode(caption_ids[0], skip_special_tokens=True)
 
-    memory_items = memory.retrieve(image_description, top_k=5) if image_description else []
-    build_messages(
-        session_messages=session_messages,
-        user_text=None,
-        image_description=image_description,
-        voice_text=None,
-        memory_items=memory_items
-    )
+    image_description = await run_in_threadpool(caption_image)
 
-    output = generate_from_messages(session_messages)
-    session_messages.append({"role": "assistant", "content": output})
+    async with get_session_lock(session_id):
+        session_messages = conversations.get(session_id)
+        memory_items = memory.retrieve(image_description, top_k=5) if image_description else []
+        build_messages(
+            session_messages=session_messages,
+            user_text=None,
+            image_description=image_description,
+            voice_text=None,
+            memory_items=memory_items
+        )
+
+        output = await run_in_threadpool(generate_from_messages, list(session_messages))
+        session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(None, image_description, None, output)
     return {"session_id": session_id, "image_description": image_description, "generated_text": output}
@@ -695,27 +724,34 @@ async def generate_from_image(file: UploadFile = File(...), session_id: str = "d
 # -----------------------------
 @app.post("/generate-voice")
 async def generate_from_voice(file: UploadFile = File(...), session_id: str = "default"):
-    session_messages = conversations.get(session_id)
-
     audio_bytes = await file.read()
-    audio_path = "temp_audio.wav"
-    with open(audio_path, "wb") as f:
-        f.write(audio_bytes)
+    audio_path = f"temp_audio_{uuid.uuid4().hex}.wav"
 
-    result = whisper_model.transcribe(audio_path)
-    voice_text = result["text"]
+    def transcribe_audio():
+        try:
+            with open(audio_path, "wb") as f:
+                f.write(audio_bytes)
+            with voice_transcription_lock:
+                return whisper_model.transcribe(audio_path)["text"]
+        finally:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
 
-    memory_items = memory.retrieve(voice_text, top_k=5) if voice_text else []
-    build_messages(
-        session_messages=session_messages,
-        user_text=None,
-        image_description=None,
-        voice_text=voice_text,
-        memory_items=memory_items
-    )
+    voice_text = await run_in_threadpool(transcribe_audio)
 
-    output = generate_from_messages(session_messages)
-    session_messages.append({"role": "assistant", "content": output})
+    async with get_session_lock(session_id):
+        session_messages = conversations.get(session_id)
+        memory_items = memory.retrieve(voice_text, top_k=5) if voice_text else []
+        build_messages(
+            session_messages=session_messages,
+            user_text=None,
+            image_description=None,
+            voice_text=voice_text,
+            memory_items=memory_items
+        )
+
+        output = await run_in_threadpool(generate_from_messages, list(session_messages))
+        session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(None, None, voice_text, output)
     threading.Thread(
