@@ -130,6 +130,8 @@ whisper_model = whisper.load_model("base")
 # Generation Lock & Memory Store
 # -----------------------------
 generation_lock = Lock()  # prevent concurrent generate() on same model instance
+image_generation_lock = Lock()
+voice_transcription_lock = Lock()
 
 memory = MemoryStore()
 memory_extractor = MemoryExtractor(model=model, generation_lock=generation_lock)
@@ -659,7 +661,7 @@ async def generate(user_text: str = Body(...), session_id: str = Body("default")
         memory_items=memory_items
     )
 
-    output = await run_in_threadpool(generate_from_messages, session_messages)
+    output = await run_in_threadpool(generate_from_messages, list(session_messages))
 
     # Append assistant reply for the next turn (core multi-turn step) [1](https://qwen.readthedocs.io/en/v2.0/inference/chat.html)
     session_messages.append({"role": "assistant", "content": output})
@@ -683,9 +685,10 @@ async def generate_from_image(file: UploadFile = File(...), session_id: str = "d
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
     def caption_image():
-        inputs = processor(images=image, return_tensors="pt")
-        caption_ids = blip_model.generate(**inputs, max_length=64)
-        return processor.decode(caption_ids[0], skip_special_tokens=True)
+        with image_generation_lock:
+            inputs = processor(images=image, return_tensors="pt")
+            caption_ids = blip_model.generate(**inputs, max_length=64)
+            return processor.decode(caption_ids[0], skip_special_tokens=True)
 
     image_description = await run_in_threadpool(caption_image)
 
@@ -698,7 +701,7 @@ async def generate_from_image(file: UploadFile = File(...), session_id: str = "d
         memory_items=memory_items
     )
 
-    output = await run_in_threadpool(generate_from_messages, session_messages)
+    output = await run_in_threadpool(generate_from_messages, list(session_messages))
     session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(None, image_description, None, output)
@@ -712,11 +715,17 @@ async def generate_from_voice(file: UploadFile = File(...), session_id: str = "d
     session_messages = conversations.get(session_id)
 
     audio_bytes = await file.read()
-    audio_path = "temp_audio.wav"
+    audio_path = f"temp_audio_{uuid.uuid4().hex}.wav"
+
     def transcribe_audio():
-        with open(audio_path, "wb") as f:
-            f.write(audio_bytes)
-        return whisper_model.transcribe(audio_path)["text"]
+        try:
+            with open(audio_path, "wb") as f:
+                f.write(audio_bytes)
+            with voice_transcription_lock:
+                return whisper_model.transcribe(audio_path)["text"]
+        finally:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
 
     voice_text = await run_in_threadpool(transcribe_audio)
 
@@ -729,7 +738,7 @@ async def generate_from_voice(file: UploadFile = File(...), session_id: str = "d
         memory_items=memory_items
     )
 
-    output = await run_in_threadpool(generate_from_messages, session_messages)
+    output = await run_in_threadpool(generate_from_messages, list(session_messages))
     session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(None, None, voice_text, output)
