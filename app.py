@@ -41,6 +41,10 @@ from train_lora import train_lora_adapter
 app = FastAPI()
 OPENAI_MODEL_ID = os.environ.get("OPENAI_MODEL_ID", "").strip() or "orions-belt"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+MEMORY_ACTION_INSTRUCTION = (
+    "When user information is remembered, do not expose memory actions, tool arguments, "
+    "or memory-action JSON as assistant text. Respond naturally to the user."
+)
 MAX_REQUEST_PROMPTS = 16
 MAX_REQUEST_PROMPT_TOKENS = 32768
 MAX_REQUEST_WORK = 8_000_000
@@ -251,6 +255,18 @@ def prepare_openai_messages(messages: list[OpenAIMessage]) -> tuple[list[dict], 
                     )
             item["content"] = "".join(text_parts)
         prompt_messages.append(item)
+
+    system_message = next(
+        (message for message in prompt_messages if message["role"] in ("system", "developer")),
+        None,
+    )
+    if system_message:
+        system_message["content"] = (
+            (system_message.get("content") or "") + "\n\n" + MEMORY_ACTION_INSTRUCTION
+        )
+    else:
+        prompt_messages.insert(0, {"role": "system", "content": MEMORY_ACTION_INSTRUCTION})
+
     user_text = next(
         (
             message["content"]
