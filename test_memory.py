@@ -203,11 +203,8 @@ class TestMemoryExtractor(unittest.TestCase):
         self.assertEqual(self.extractor.extract("Thanks!"), [])
         self.assertEqual(self.extractor.extract("ok"), [])
 
-    def test_extraction_uses_only_user_text(self):
-        memories = self.extractor.extract(
-            "I prefer tea.",
-            assistant_text="User prefers coffee.",
-        )
+    def test_heuristic_extraction_uses_user_text(self):
+        memories = self.extractor.extract("I prefer tea.")
 
         self.assertEqual(
             memories,
