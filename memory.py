@@ -1,9 +1,6 @@
-import json
 import re
 import time
 import uuid
-import urllib.request
-import urllib.error
 from typing import List, Dict, Any, Optional
 
 try:
@@ -289,29 +286,6 @@ class MemoryStore:
         return [r["text"] for r in results]
 
 
-# -----------------------------
-# Automatic Memory Extraction
-# -----------------------------
-EXTRACTION_SYSTEM_PROMPT = (
-    "You are a memory extraction assistant. Extract key facts, preferences, background details, "
-    "constraints, or goals about the user that are worth remembering long-term across chats, but "
-    "only when the user explicitly states or confirms them. Do not infer facts from questions, "
-    "requests, hypotheticals, or quoted text. Ignore generic conversation, greetings, and ephemeral "
-    "requests. Never extract topic labels, tags, categories, or keyword phrases (e.g. 'Pets', "
-    "'Dogs', or 'Pet Care'). "
-    "For each extracted memory, provide a concise complete declarative sentence (e.g. "
-    "'User is a backend engineer') "
-    "and an importance score from 1 to 10 (1=minor detail, 10=critical identity/constraint/allergy). "
-    "Respond ONLY with a valid JSON array of objects with 'text' and 'importance' keys: "
-    '[{"text": "...", "importance": 8}]. If nothing is worth remembering, respond with [].'
-)
-
-_MEMORY_SENTENCE_PATTERN = re.compile(
-    r"^(?:user(?:'s)?|i)\s+\S+(?:\s+.*)?$",
-    re.I,
-)
-
-
 _HEURISTIC_PATTERNS = [
     # Allergies and health constraints (top priority)
     (re.compile(r"\b(?:i am|i'm)\s+allergic to\s+([^.,;!\n]+)", re.I), "User is allergic to {match}", 10.0),
@@ -337,17 +311,7 @@ _HEURISTIC_PATTERNS = [
 
 
 class MemoryExtractor:
-    """Extracts long-term user memories and importance scores using LLM or heuristic fallbacks."""
-
-    def __init__(
-        self,
-        model: Any = None,
-        generation_lock: Any = None,
-        api_base: str | None = None,
-    ):
-        self.model = model
-        self.generation_lock = generation_lock
-        self.api_base = api_base
+    """Extracts long-term user memories and importance scores with text patterns."""
 
     def _heuristic_extract(self, text: str) -> List[Dict[str, Any]]:
         extracted = []
@@ -370,63 +334,11 @@ class MemoryExtractor:
                     })
         return extracted
 
-    def _call_api_chat(self, prompt: str) -> str | None:
-        if not self.api_base:
-            return None
-        url = f"{self.api_base.rstrip('/')}/chat/completions"
-        payload = json.dumps({
-            "model": "orions-belt",
-            "messages": [
-                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 256,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return data["choices"][0]["message"]["content"]
-        except Exception:
-            return None
-
-    def _call_model_chat(self, prompt: str) -> str | None:
-        if self.model is None:
-            return None
-        try:
-            messages = [
-                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ]
-            if self.generation_lock is not None:
-                with self.generation_lock:
-                    result = self.model.create_chat_completion(
-                        messages=messages,
-                        max_tokens=256,
-                        temperature=0.1,
-                    )
-            else:
-                result = self.model.create_chat_completion(
-                    messages=messages,
-                    max_tokens=256,
-                    temperature=0.1,
-                )
-            return (result["choices"][0]["message"]["content"] or "").strip()
-        except Exception:
-            return None
-
     def extract(
         self,
         user_text: str | None,
-        assistant_text: str | None = None,
     ) -> List[Dict[str, Any]]:
-        """Extract memories from a conversation turn with importance scores."""
+        """Extract memories from user text with importance scores."""
         user_text = (user_text or "").strip()
         if not user_text or len(user_text) < 4:
             return []
@@ -435,49 +347,16 @@ class MemoryExtractor:
         if re.fullmatch(r"(?i)(?:hi|hello|hey|thanks|thank you|ok|okay|bye|good morning)[.! ]*", user_text):
             return []
 
-        prompt = f"User message:\n{user_text}"
-
-        raw_output = None
-        # Try local model first, then API if configured
-        if self.model is not None:
-            raw_output = self._call_model_chat(prompt)
-        elif self.api_base:
-            raw_output = self._call_api_chat(prompt)
-
-        # Parse LLM output if available
-        if raw_output:
-            cleaned = raw_output.strip()
-            # Strip markdown json block if wrapped
-            if cleaned.startswith("```"):
-                cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-                cleaned = re.sub(r"\s*```$", "", cleaned)
-            try:
-                parsed = json.loads(cleaned)
-                if isinstance(parsed, list):
-                    items = []
-                    for item in parsed:
-                        if isinstance(item, dict) and "text" in item:
-                            txt = str(item["text"]).strip()
-                            if _MEMORY_SENTENCE_PATTERN.fullmatch(txt):
-                                imp = float(item.get("importance", 5.0))
-                                imp = max(1.0, min(10.0, imp))
-                                items.append({"text": txt, "importance": imp})
-                    return items
-            except Exception:
-                pass
-
-        # Fallback to heuristic extraction
         return self._heuristic_extract(user_text)
 
     def extract_and_store(
         self,
         memory_store: MemoryStore,
         user_text: str | None,
-        assistant_text: str | None = None,
         source: str = "automatic_extraction",
     ) -> List[Dict[str, Any]]:
         """Extract memories from conversation and store them in ChromaDB."""
-        extracted = self.extract(user_text, assistant_text)
+        extracted = self.extract(user_text)
         stored = []
         for item in extracted:
             doc_id = memory_store.add(

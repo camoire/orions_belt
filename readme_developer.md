@@ -153,7 +153,7 @@ Generate a response using the model + memory.
 
 ### **OpenAI-Compatible Endpoints**
 - `GET /v1/models`
-- `POST /v1/chat/completions` (supports streaming and non-streaming; automatically retrieves top 5 memories into prompt and extracts new memories in the background)
+- `POST /v1/chat/completions` (supports streaming and non-streaming; automatically retrieves top 5 memories into the prompt and applies text-pattern memory extraction to user messages in the background)
 
 ### **🧠 Memory System Endpoints (Open WebUI "Memory" Page Integration)**
 - `GET /memory/memory_list` or `GET /api/v1/memories`: List stored memories with pagination (`limit`, `offset`)
@@ -162,7 +162,7 @@ Generate a response using the model + memory.
 - `PUT /memory/{memory_id}` or `PUT /api/v1/memories/{memory_id}`: Update memory text and/or importance score (1.0-10.0)
 - `DELETE /memory/{memory_id}` or `DELETE /api/v1/memories/{memory_id}`: Remove a memory from ChromaDB
 - `POST /memory/memory_search`: Search memories with hybrid similarity + importance scoring
-- `POST /memory/memory_extract`: Extract memories from arbitrary text
+- `POST /memory/memory_extract`: Apply text-pattern memory extraction to provided text
 - `GET /memory/stats`: Return ChromaDB collection statistics
 
 ### **POST /train-now** and **GET /training-status**

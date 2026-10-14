@@ -149,16 +149,15 @@ def get_session_lock(session_id: str) -> asyncio.Lock:
     return lock
 
 memory = MemoryStore()
-memory_extractor = MemoryExtractor(model=model, generation_lock=generation_lock)
+memory_extractor = MemoryExtractor()
 
-def extract_memories_background(user_text: str | None, assistant_text: str | None = None):
+def extract_memories_background(user_text: str | None):
     if not user_text:
         return
     try:
         memory_extractor.extract_and_store(
             memory_store=memory,
             user_text=user_text,
-            assistant_text=assistant_text,
             source="automatic_extraction",
         )
     except Exception as exc:
@@ -389,7 +388,7 @@ def openai_stream(
         log_interaction(user_text, None, None, output)
         threading.Thread(
             target=extract_memories_background,
-            args=(user_text, output),
+            args=(user_text,),
             daemon=True,
         ).start()
         finish_chunk = {
@@ -509,7 +508,7 @@ async def openai_chat_completions(request: ChatCompletionRequest):
         log_interaction(user_text, None, None, choice_output)
         threading.Thread(
             target=extract_memories_background,
-            args=(user_text, choice_output),
+            args=(user_text,),
             daemon=True,
         ).start()
     return {
@@ -743,7 +742,7 @@ async def generate_stream(user_text: str, session_id: str) -> AsyncIterator[str]
     log_interaction(user_text, None, None, output)
     threading.Thread(
         target=extract_memories_background,
-        args=(user_text, output),
+        args=(user_text,),
         daemon=True,
     ).start()
     yield f"event: done\ndata: {json.dumps({'session_id': session_id, 'generated_text': output})}\n\n"
@@ -787,7 +786,7 @@ async def generate(
     log_interaction(user_text, None, None, output)
     threading.Thread(
         target=extract_memories_background,
-        args=(user_text, output),
+        args=(user_text,),
         daemon=True,
     ).start()
     return {"session_id": session_id, "generated_text": output}
@@ -862,7 +861,7 @@ async def generate_from_voice(file: UploadFile = File(...), session_id: str = "d
     log_interaction(None, None, voice_text, output)
     threading.Thread(
         target=extract_memories_background,
-        args=(voice_text, output),
+        args=(voice_text,),
         daemon=True,
     ).start()
     return {"session_id": session_id, "transcription": voice_text, "generated_text": output}
@@ -911,7 +910,6 @@ class MemoryListResponse(BaseModel):
 class MemoryExtractRequest(BaseModel):
     text: Optional[str] = Field(default=None, max_length=10_000)
     user_text: Optional[str] = Field(default=None, max_length=10_000)
-    assistant_text: Optional[str] = Field(default=None, max_length=10_000)
     auto_store: bool = True
 
 class ExtractedMemoryItem(BaseModel):
@@ -978,15 +976,11 @@ async def memory_extract(req: MemoryExtractRequest):
         stored = memory_extractor.extract_and_store(
             memory_store=memory,
             user_text=target_user_text,
-            assistant_text=req.assistant_text,
             source="manual_extraction",
         )
         items = [ExtractedMemoryItem(**s) for s in stored]
     else:
-        extracted = memory_extractor.extract(
-            user_text=target_user_text,
-            assistant_text=req.assistant_text,
-        )
+        extracted = memory_extractor.extract(user_text=target_user_text)
         items = [ExtractedMemoryItem(text=e["text"], importance=e["importance"]) for e in extracted]
     return MemoryExtractResponse(memories=items, count=len(items))
 
@@ -1066,7 +1060,6 @@ def reload_lora():
                 old_model.close()
             gc.collect()
             model = load_qwen_model()
-            memory_extractor.model = model
         except Exception as exc:
             print(f"GGUF model reload failed: {exc}")
             raise HTTPException(

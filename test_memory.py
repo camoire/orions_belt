@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock
 import time
 
-from memory import MemoryStore, MemoryExtractor, EXTRACTION_SYSTEM_PROMPT
+from memory import MemoryStore, MemoryExtractor
 from prompt_builder import build_messages, build_prompt
 
 
@@ -203,89 +203,13 @@ class TestMemoryExtractor(unittest.TestCase):
         self.assertEqual(self.extractor.extract("Thanks!"), [])
         self.assertEqual(self.extractor.extract("ok"), [])
 
-    def test_llm_extraction_parsing(self):
-        mock_model = MagicMock()
-        mock_model.create_chat_completion.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "content": '```json\n[{"text": "User works at OpenAI", "importance": 8.0}]\n```'
-                    }
-                }
-            ]
-        }
-        extractor = MemoryExtractor(model=mock_model)
-        memories = extractor.extract("I work at OpenAI.")
-        self.assertEqual(len(memories), 1)
-        self.assertEqual(memories[0]["text"], "User works at OpenAI")
-        self.assertEqual(memories[0]["importance"], 8.0)
-
-    def test_llm_extraction_ignores_topic_tags(self):
-        mock_model = MagicMock()
-        mock_model.create_chat_completion.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "content": (
-                            '[{"text": "Pets", "importance": 7}, '
-                            '{"text": "Dogs", "importance": 7}, '
-                            '{"text": "Pet Care", "importance": 6}, '
-                            '{"text": "Things I Like", "importance": 7}, '
-                            '{"text": "User has two dogs", "importance": 8}, '
-                            '{"text": "User travels by train", "importance": 8}, '
-                            '{"text": "User avoids gluten", "importance": 9}]'
-                        )
-                    }
-                }
-            ]
-        }
-        extractor = MemoryExtractor(model=mock_model)
-
-        memories = extractor.extract("I have two dogs.")
+    def test_heuristic_extraction_uses_user_text(self):
+        memories = self.extractor.extract("I prefer tea.")
 
         self.assertEqual(
             memories,
-            [
-                {"text": "User has two dogs", "importance": 8.0},
-                {"text": "User travels by train", "importance": 8.0},
-                {"text": "User avoids gluten", "importance": 9.0},
-            ],
+            [{"text": "User prefers tea", "importance": 7.0}],
         )
-        self.assertIn("Never extract topic labels, tags, categories", EXTRACTION_SYSTEM_PROMPT)
-
-    def test_empty_llm_result_does_not_fall_back_to_heuristics(self):
-        mock_model = MagicMock()
-        mock_model.create_chat_completion.return_value = {
-            "choices": [{"message": {"content": "[]"}}]
-        }
-        extractor = MemoryExtractor(model=mock_model)
-
-        self.assertEqual(
-            extractor.extract("Can you remember that I live in Paris?"),
-            [],
-        )
-
-    def test_extraction_ignores_assistant_reply_and_follow_up_questions(self):
-        mock_model = MagicMock()
-        mock_model.create_chat_completion.return_value = {
-            "choices": [{"message": {"content": "[]"}}]
-        }
-        extractor = MemoryExtractor(model=mock_model)
-
-        memories = extractor.extract(
-            "What's my name?",
-            assistant_text=(
-                "Your name is Cameron.\n"
-                "Follow up: What are the names of my dogs?\n"
-                "What kind of stories do you enjoy hearing about my dogs?"
-            ),
-        )
-
-        self.assertEqual(memories, [])
-        messages = mock_model.create_chat_completion.call_args.kwargs["messages"]
-        self.assertEqual(messages[1]["content"], "User message:\nWhat's my name?")
-        self.assertNotIn("Cameron", messages[1]["content"])
-        self.assertIn("only when the user explicitly states or confirms them", messages[0]["content"])
 
     def test_extract_and_store(self):
         mock_client = MagicMock()
