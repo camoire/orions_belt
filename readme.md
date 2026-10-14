@@ -211,7 +211,7 @@ and an inference work budget of 8,000,000 prompt-token/output-token units.
 ### **🧠 Memory System & Endpoints**
 
 OrionsBelt includes an intelligent long-term memory system with ChromaDB:
-- **Automatic Memory Extraction**: After each user interaction, a background worker analyzes conversation turns to extract durable user facts, preferences, constraints, and instructions without blocking chat responses.
+- **Automatic Memory Extraction**: After each user interaction, a background worker applies text-pattern rules to the user's message to find supported facts and preferences without blocking chat responses; it does not use an LLM.
 - **Importance Scoring**: Each memory item receives an importance score from 1.0 to 10.0 (e.g., allergies/safety: 10.0, identity/names: 9.0, professions/goals: 8.0, preferences: 6.0-7.0, casual facts: 5.0).
 - **ChromaDB Storage**: Stored with embeddings and metadata (`importance`, `source`, `timestamp`) for persistent retrieval.
 - **Top 5 Prompt Injection**: On each chat completion or generation request, the top 5 most relevant memories—ranked using hybrid scoring combining semantic similarity and normalized importance—are injected into the system prompt context.
@@ -222,7 +222,7 @@ OrionsBelt includes an intelligent long-term memory system with ChromaDB:
   - `PUT /memory/{memory_id}` (and `PUT /api/v1/memories/{memory_id}`): Update a memory's text or importance
   - `DELETE /memory/{memory_id}` (and `DELETE /api/v1/memories/{memory_id}`): Delete a memory
   - `POST /memory/memory_search`: Search memories using hybrid semantic + importance ranking
-  - `POST /memory/memory_extract`: Manually trigger extraction from provided text
+  - `POST /memory/memory_extract`: Manually apply the text-pattern extraction rules to provided text
   - `GET /memory/stats`: Get total memory count and collection statistics
 
 ### **POST /generate**
