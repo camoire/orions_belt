@@ -3,8 +3,8 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 
 BASE_DIR = Path(__file__).resolve().parent
-QWEN_REPO = "bartowski/Qwen2.5-Coder-14B-Instruct-GGUF"
-QWEN_FILE = "Qwen2.5-Coder-14B-Instruct-Q6_K.gguf"
+QWEN_REPO = "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"
+QWEN_FILE = "qwen2.5-coder-7b-instruct-q5_k_m.gguf"
 BLIP_REPO = "Salesforce/blip-image-captioning-base"
 
 def main():

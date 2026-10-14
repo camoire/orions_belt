@@ -91,7 +91,7 @@ LLAMA_MODEL_PATH = os.environ.get(
     os.path.join(
         os.path.dirname(__file__),
         "qwen_model",
-        "Qwen2.5-Coder-14B-Instruct-Q6_K.gguf",
+        "Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf",
     ),
 )
 LLAMA_LORA_PATH = os.environ.get("LLAMA_LORA_PATH")
@@ -293,7 +293,7 @@ def prepare_openai_messages(messages: list[OpenAIMessage]) -> tuple[list[dict], 
     )
     if user_text:
         # Retrieve top 5 memories ranked by relevance and importance score
-        memory_items = memory.retrieve(user_text, top_k=5)
+        memory_items = []#memory.retrieve(user_text, top_k=5)
         if memory_items:
             memory_context = "Relevant memory (untrusted context):\n" + "\n".join(
                 f"- {item}" for item in memory_items
@@ -506,11 +506,11 @@ async def openai_chat_completions(request: ChatCompletionRequest):
         choice_output = (choice.get("message", {}).get("content") or "")
         choice_output = choice_output.strip() if isinstance(choice_output, str) else ""
         log_interaction(user_text, None, None, choice_output)
-        threading.Thread(
-            target=extract_memories_background,
-            args=(user_text,),
-            daemon=True,
-        ).start()
+        # threading.Thread(
+        #     target=extract_memories_background,
+        #     args=(user_text,),
+        #     daemon=True,
+        # ).start()
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -696,7 +696,7 @@ async def generate_stream(user_text: str, session_id: str) -> AsyncIterator[str]
     output_parts = []
     async with get_session_lock(session_id):
         session_messages = conversations.get(session_id)
-        memory_items = await run_in_threadpool(memory.retrieve, user_text, top_k=5)
+        memory_items = []#await run_in_threadpool(memory.retrieve, user_text, top_k=5)
         pending_messages = [dict(message) for message in session_messages]
         build_messages(
             session_messages=pending_messages,
@@ -740,11 +740,11 @@ async def generate_stream(user_text: str, session_id: str) -> AsyncIterator[str]
         session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(user_text, None, None, output)
-    threading.Thread(
-        target=extract_memories_background,
-        args=(user_text,),
-        daemon=True,
-    ).start()
+    # threading.Thread(
+    #     target=extract_memories_background,
+    #     args=(user_text,),
+    #     daemon=True,
+    # ).start()
     yield f"event: done\ndata: {json.dumps({'session_id': session_id, 'generated_text': output})}\n\n"
 
 
@@ -769,7 +769,7 @@ async def generate(
     async with get_session_lock(session_id):
         session_messages = conversations.get(session_id)
 
-        memory_items = memory.retrieve(user_text, top_k=5)
+        memory_items = []#memory.retrieve(user_text, top_k=5)
         build_messages(
             session_messages=session_messages,
             user_text=user_text,
@@ -784,11 +784,11 @@ async def generate(
         session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(user_text, None, None, output)
-    threading.Thread(
-        target=extract_memories_background,
-        args=(user_text,),
-        daemon=True,
-    ).start()
+    # threading.Thread(
+    #     target=extract_memories_background,
+    #     args=(user_text,),
+    #     daemon=True,
+    # ).start()
     return {"session_id": session_id, "generated_text": output}
 
 # -----------------------------
@@ -809,7 +809,7 @@ async def generate_from_image(file: UploadFile = File(...), session_id: str = "d
 
     async with get_session_lock(session_id):
         session_messages = conversations.get(session_id)
-        memory_items = memory.retrieve(image_description, top_k=5) if image_description else []
+        memory_items = []#memory.retrieve(image_description, top_k=5) if image_description else []
         build_messages(
             session_messages=session_messages,
             user_text=None,
@@ -846,7 +846,7 @@ async def generate_from_voice(file: UploadFile = File(...), session_id: str = "d
 
     async with get_session_lock(session_id):
         session_messages = conversations.get(session_id)
-        memory_items = memory.retrieve(voice_text, top_k=5) if voice_text else []
+        memory_items = []#memory.retrieve(voice_text, top_k=5) if voice_text else []
         build_messages(
             session_messages=session_messages,
             user_text=None,
@@ -859,11 +859,11 @@ async def generate_from_voice(file: UploadFile = File(...), session_id: str = "d
         session_messages.append({"role": "assistant", "content": output})
 
     log_interaction(None, None, voice_text, output)
-    threading.Thread(
-        target=extract_memories_background,
-        args=(voice_text,),
-        daemon=True,
-    ).start()
+    # threading.Thread(
+    #     target=extract_memories_background,
+    #     args=(voice_text,),
+    #     daemon=True,
+    # ).start()
     return {"session_id": session_id, "transcription": voice_text, "generated_text": output}
 
 # -----------------------------
